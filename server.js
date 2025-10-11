@@ -1192,7 +1192,7 @@ app.post('/api/upload-and-send', upload.fields([
             }, 2000); // 2 second delay
         } else {
             // For non-campaign messages, send immediately
-            await sendMessagesSequentially(phoneNumbers, message, campaignId, 0, delayRange);
+            await sendMessagesSequentially(phoneNumbers, message, campaignId, 0, delayRange, mediaFile);
         }
 
         // Only emit completion for non-campaign messages (campaign messages will emit completion in sendMessagesSequentially)
@@ -1296,7 +1296,7 @@ function calculateReadingTime(message) {
 
 // Puppeteer-based message sending strategy using URL method (text messages only)
 // This implements the WhatsApp URL method exactly as in the working test code
-async function sendMessageWithPuppeteer(phoneNumber, message) {
+async function sendMessageWithPuppeteer(phoneNumber, message, mediaFile = null) {
     try {
         console.log(`Using Puppeteer URL method to send message to ${phoneNumber}`);
         
@@ -1308,33 +1308,86 @@ async function sendMessageWithPuppeteer(phoneNumber, message) {
         // Get the phone number without @c.us suffix for URL
         const cleanPhoneNumber = phoneNumber.replace('@c.us', '');
         
-        // Encode the message for URL (exactly as in test code)
-        const encodedMessage = encodeURIComponent(message);
-        
-        // Create WhatsApp Web URL (exactly as in test code)
-        const whatsappUrl = `https://web.whatsapp.com/send?phone=${cleanPhoneNumber}&text=${encodedMessage}`;
-        
-        console.log(`Navigating to WhatsApp URL: ${whatsappUrl}`);
-        
-        // Navigate to the WhatsApp URL using the existing client's page (exactly as in test code)
-        await client.pupPage.goto(whatsappUrl, { waitUntil: 'networkidle2' });
-        
-        // Wait for the message input box (exactly as in test code)
-        console.log('Waiting for message input box...');
-        const inputBox = await client.pupPage.waitForSelector('div[contenteditable="true"][data-tab="10"]', { timeout: 30000 });
-        
-        // Wait a bit for the page to fully load (exactly as in test code)
-        await client.pupPage.waitForTimeout(3000);
-        
-        // Send the message by pressing Enter (exactly as in test code)
-        console.log('Sending message...');
-        await inputBox.press('Enter');
-        
-        // Wait for message to be sent (exactly as in test code)
-        await client.pupPage.waitForTimeout(2000);
-        
-        console.log(`✓ Message sent successfully to ${phoneNumber} using Puppeteer URL method!`);
-        return true;
+        // For text messages, use URL method
+        if (!mediaFile) {
+            // Encode the message for URL (exactly as in test code)
+            const encodedMessage = encodeURIComponent(message);
+            
+            // Create WhatsApp Web URL (exactly as in test code)
+            const whatsappUrl = `https://web.whatsapp.com/send?phone=${cleanPhoneNumber}&text=${encodedMessage}`;
+            
+            console.log(`Navigating to WhatsApp URL: ${whatsappUrl}`);
+            
+            // Navigate to the WhatsApp URL using the existing client's page (exactly as in test code)
+            await client.pupPage.goto(whatsappUrl, { waitUntil: 'networkidle2' });
+            
+            // Wait for the message input box (exactly as in test code)
+            console.log('Waiting for message input box...');
+            const inputBox = await client.pupPage.waitForSelector('div[contenteditable="true"][data-tab="10"]', { timeout: 30000 });
+            
+            // Wait a bit for the page to fully load (exactly as in test code)
+            await client.pupPage.waitForTimeout(3000);
+            
+            // Send the message by pressing Enter (exactly as in test code)
+            console.log('Sending message...');
+            await inputBox.press('Enter');
+            
+            // Wait for message to be sent (exactly as in test code)
+            await client.pupPage.waitForTimeout(2000);
+            
+            console.log(`✓ Message sent successfully to ${phoneNumber} using Puppeteer URL method!`);
+            return true;
+        } else {
+            // For media messages, use direct navigation and file upload
+            const whatsappUrl = `https://web.whatsapp.com/send?phone=${cleanPhoneNumber}`;
+            
+            console.log(`Navigating to WhatsApp URL for media: ${whatsappUrl}`);
+            
+            // Navigate to the WhatsApp URL
+            await client.pupPage.goto(whatsappUrl, { waitUntil: 'networkidle2' });
+            
+            // Wait for the chat to load
+            console.log('Waiting for chat to load...');
+            await client.pupPage.waitForSelector('div[contenteditable="true"][data-tab="10"]', { timeout: 30000 });
+            
+            // Wait a bit for the page to fully load
+            await client.pupPage.waitForTimeout(3000);
+            
+            // Click on the attachment button
+            console.log('Clicking attachment button...');
+            const attachmentButton = await client.pupPage.waitForSelector('div[data-testid="attach-document"]', { timeout: 10000 });
+            await attachmentButton.click();
+            
+            // Wait for file input
+            await client.pupPage.waitForTimeout(1000);
+            
+            // Upload the media file
+            console.log('Uploading media file...');
+            const fileInput = await client.pupPage.waitForSelector('input[type="file"]', { timeout: 10000 });
+            await fileInput.uploadFile(mediaFile.path);
+            
+            // Wait for file to be processed
+            await client.pupPage.waitForTimeout(3000);
+            
+            // Add caption if message is provided
+            if (message && message.trim()) {
+                console.log('Adding caption...');
+                const captionInput = await client.pupPage.waitForSelector('div[contenteditable="true"][data-tab="10"]', { timeout: 10000 });
+                await captionInput.click();
+                await captionInput.type(message);
+            }
+            
+            // Send the message
+            console.log('Sending media message...');
+            const sendButton = await client.pupPage.waitForSelector('span[data-testid="send"]', { timeout: 10000 });
+            await sendButton.click();
+            
+            // Wait for message to be sent
+            await client.pupPage.waitForTimeout(2000);
+            
+            console.log(`✓ Media message sent successfully to ${phoneNumber} using Puppeteer method!`);
+            return true;
+        }
         
     } catch (error) {
         console.error(`Error sending message with Puppeteer to ${phoneNumber}:`, error.message);
@@ -1509,11 +1562,12 @@ async function continueCampaign(campaignId) {
         campaignState.message,
         campaignId,
         0, // Start from 0 since we're only processing pending numbers
-        campaignState.delayRange || '1800-3600'
+        campaignState.delayRange || '1800-3600',
+        campaignState.mediaFile
     );
 }
 
-async function sendMessagesSequentially(phoneNumbers, message, campaignId = null, startIndex = 0, delayRange = "1800-3600") {
+async function sendMessagesSequentially(phoneNumbers, message, campaignId = null, startIndex = 0, delayRange = "1800-3600", mediaFile = null) {
     const results = [];
     let successCount = 0;
     let failureCount = 0;
@@ -1587,8 +1641,8 @@ async function sendMessagesSequentially(phoneNumbers, message, campaignId = null
                     sendAttempts++;
                     console.log(`Send attempt ${sendAttempts}/${maxAttempts} for ${phoneNumber}`);
             
-                    // Use Puppeteer URL method for sending text messages
-                    await sendMessageWithPuppeteer(phoneNumber, message);
+                    // Use Puppeteer URL method for sending messages (text or media)
+                    await sendMessageWithPuppeteer(phoneNumber, message, mediaFile);
                     
                     messageSent = true;
                     console.log(`Message sent successfully to ${phoneNumber}`);

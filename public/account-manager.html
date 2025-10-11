@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WhatsApp Bulk Sender - Account Manager</title>
+    <link rel="stylesheet" href="account-manager-styles.css">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+</head>
+<body>
+    <div class="container">
+        <header class="header">
+            <div class="header-content">
+                <i class="fab fa-whatsapp"></i>
+                <h1>WhatsApp Account Manager</h1>
+                <div class="header-actions">
+                    <button class="back-btn" onclick="goToDashboard()">
+                        <i class="fas fa-arrow-left"></i>
+                        Back to Dashboard
+                    </button>
+                    <button class="logout-btn" onclick="logout()">
+                        <i class="fas fa-sign-out-alt"></i>
+                        Logout
+                    </button>
+                </div>
+            </div>
+        </header>
+
+        <main class="main-content">
+            <!-- Account List Section -->
+            <section class="accounts-section">
+                <div class="section-header">
+                    <h2><i class="fas fa-users"></i> WhatsApp Accounts</h2>
+                    <button class="add-account-btn" onclick="showAddAccountModal()">
+                        <i class="fas fa-plus"></i>
+                        Add New Account
+                    </button>
+                </div>
+
+                <div class="accounts-grid" id="accountsGrid">
+                    <!-- Accounts will be dynamically loaded here -->
+                    <div class="no-accounts" id="noAccounts">
+                        <i class="fas fa-user-plus"></i>
+                        <h3>No WhatsApp Accounts</h3>
+                        <p>Create your first WhatsApp account to get started</p>
+                        <button class="create-first-btn" onclick="showAddAccountModal()">
+                            <i class="fas fa-plus"></i>
+                            Create First Account
+                        </button>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Account Stats Section -->
+            <section class="stats-section">
+                <div class="stats-header">
+                    <h2><i class="fas fa-chart-bar"></i> Account Statistics</h2>
+                </div>
+                <div class="stats-grid" id="statsGrid">
+                    <div class="stat-card">
+                        <div class="stat-icon">
+                            <i class="fas fa-users"></i>
+                        </div>
+                        <div class="stat-info">
+                            <h3 id="totalAccounts">0</h3>
+                            <p>Total Accounts</p>
+                        </div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon connected">
+                            <i class="fas fa-check-circle"></i>
+                        </div>
+                        <div class="stat-info">
+                            <h3 id="connectedAccounts">0</h3>
+                            <p>Connected</p>
+                        </div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon pending">
+                            <i class="fas fa-clock"></i>
+                        </div>
+                        <div class="stat-info">
+                            <h3 id="pendingAccounts">0</h3>
+                            <p>Pending</p>
+                        </div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon campaigns">
+                            <i class="fas fa-paper-plane"></i>
+                        </div>
+                        <div class="stat-info">
+                            <h3 id="totalCampaigns">0</h3>
+                            <p>Total Campaigns</p>
+                        </div>
+                    </div>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <!-- Add Account Modal -->
+    <div id="addAccountModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3><i class="fas fa-plus-circle"></i> Add New WhatsApp Account</h3>
+                <button class="close-btn" onclick="hideAddAccountModal()" title="Close modal" aria-label="Close modal">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            <form id="addAccountForm" class="modal-form">
+                <div class="form-group">
+                    <label for="accountName">
+                        <i class="fas fa-tag"></i>
+                        Account Name
+                    </label>
+                    <input type="text" id="accountName" name="accountName" required placeholder="e.g., Business Account, Personal Account">
+                </div>
+                
+                <div class="form-group">
+                    <label for="accountDescription">
+                        <i class="fas fa-info-circle"></i>
+                        Description (Optional)
+                    </label>
+                    <textarea id="accountDescription" name="accountDescription" placeholder="Brief description of this account's purpose"></textarea>
+                </div>
+
+                <div class="form-group">
+                    <label for="accountColor">
+                        <i class="fas fa-palette"></i>
+                        Account Color
+                    </label>
+                    <div class="color-picker">
+                        <input type="color" id="accountColor" name="accountColor" value="#25D366">
+                        <div class="color-options">
+                            <button type="button" class="color-option" data-color="#25D366" style="background: #25D366;" title="Select green color" aria-label="Select green color"></button>
+                            <button type="button" class="color-option" data-color="#007bff" style="background: #007bff;" title="Select blue color" aria-label="Select blue color"></button>
+                            <button type="button" class="color-option" data-color="#28a745" style="background: #28a745;" title="Select green color" aria-label="Select green color"></button>
+                            <button type="button" class="color-option" data-color="#dc3545" style="background: #dc3545;" title="Select red color" aria-label="Select red color"></button>
+                            <button type="button" class="color-option" data-color="#ffc107" style="background: #ffc107;" title="Select yellow color" aria-label="Select yellow color"></button>
+                            <button type="button" class="color-option" data-color="#6f42c1" style="background: #6f42c1;" title="Select purple color" aria-label="Select purple color"></button>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="form-actions">
+                    <button type="button" class="cancel-btn" onclick="hideAddAccountModal()">
+                        <i class="fas fa-times"></i>
+                        Cancel
+                    </button>
+                    <button type="submit" class="create-btn">
+                        <i class="fas fa-plus"></i>
+                        Create Account
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Account Details Modal -->
+    <div id="accountDetailsModal" class="modal">
+        <div class="modal-content large">
+            <div class="modal-header">
+                <h3 id="accountDetailsTitle"><i class="fas fa-user"></i> Account Details</h3>
+                <button class="close-btn" onclick="hideAccountDetailsModal()" title="Close modal" aria-label="Close modal">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            <div class="account-details-content" id="accountDetailsContent">
+                <!-- Account details will be loaded here -->
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast Container -->
+    <div class="toast-container" id="toastContainer"></div>
+
+    <script src="account-manager.js"></script>
+</body>
+</html>
