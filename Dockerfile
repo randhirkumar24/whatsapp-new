@@ -21,10 +21,10 @@ ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true \
 WORKDIR /app
 
 # Copy package files
-COPY package.json ./
+COPY package*.json ./
 
-# Install dependencies (use npm install if package-lock.json is missing)
-RUN if [ -f package-lock.json ]; then npm ci --omit=dev; else npm install --omit=dev; fi
+# Install dependencies
+RUN npm ci --only=production
 
 # Copy app source
 COPY . .

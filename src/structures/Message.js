@@ -259,14 +259,6 @@ class Message extends Base {
         }
         
         /**
-         * Protocol message key.
-         * Can be used to retrieve the ID of an original message that was revoked.
-         */
-        if (data.protocolMessageKey) {
-            this.protocolMessageKey = data.protocolMessageKey;
-        }
-
-        /**
          * Links included in the message.
          * @type {Array<{link: string, isSuspicious: boolean}>}
          *

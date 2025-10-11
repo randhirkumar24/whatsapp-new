@@ -949,16 +949,42 @@ app.post('/api/upload-and-send', upload.fields([
         }
 
         const message = req.body.message || 'Hello! This is a message from WhatsApp Bulk Sender.';
-        const fileType = req.body.fileType || 'excel'; // 'excel' or 'media'
+        const fileType = req.body.fileType || 'text'; // 'text', 'excel', or 'media'
         const campaignId = req.body.campaignId || null;
+        const delayRange = req.body.delayRange || '1800-3600'; // Default to 30-60 minutes
         
         let phoneNumbers = [];
         let mediaFile = null;
 
-        if (fileType === 'excel') {
-            // For text messages, we need Excel file
+        if (fileType === 'text') {
+            // For text messages, we need phone numbers from text input
+            const phoneNumbersText = req.body.phoneNumbers;
+            if (!phoneNumbersText) {
+                return res.status(400).json({ error: 'Phone numbers are required for text messages' });
+            }
+            
+            // Parse phone numbers from text input
+            const phoneNumbersList = phoneNumbersText
+                .split('\n')
+                .map(num => num.trim())
+                .filter(num => num.length > 0);
+                
+            // Validate and format phone numbers
+            for (let i = 0; i < phoneNumbersList.length; i++) {
+                const formattedNumber = validateAndFormatPhoneNumber(phoneNumbersList[i], i);
+                if (formattedNumber) {
+                    phoneNumbers.push(formattedNumber);
+                }
+            }
+                
+            if (phoneNumbers.length === 0) {
+                return res.status(400).json({ error: 'No valid phone numbers found' });
+            }
+            
+        } else if (fileType === 'excel') {
+            // For Excel file uploads, we need Excel file
             if (!req.files.excelFile) {
-                return res.status(400).json({ error: 'Excel file is required for text messages' });
+                return res.status(400).json({ error: 'Excel file is required for Excel uploads' });
             }
             
             // Read the uploaded Excel file
@@ -985,38 +1011,59 @@ app.post('/api/upload-and-send', upload.fields([
             }
 
         } else if (fileType === 'media') {
-            // For media messages, we need both media file and Excel file
+            // For media messages, we need media file and phone numbers
             if (!req.files.mediaFile) {
                 return res.status(400).json({ error: 'Media file is required for media messages' });
             }
             
-            if (!req.files.excelFile) {
-                fs.unlinkSync(req.files.mediaFile[0].path);
-                return res.status(400).json({ error: 'Excel file is required for media messages' });
-            }
-
-            // Read the uploaded Excel file
-            const workbook = xlsx.readFile(req.files.excelFile[0].path);
-            const sheetName = workbook.SheetNames[0];
-            const worksheet = workbook.Sheets[sheetName];
-            const data = xlsx.utils.sheet_to_json(worksheet, { header: 1 });
-
-            // Extract phone numbers (assuming they are in the first column)
-            for (let i = 0; i < data.length; i++) {
-                if (data[i][0]) {
-                    const phoneNumber = data[i][0].toString().trim();
-                    const formattedNumber = validateAndFormatPhoneNumber(phoneNumber, i);
+            // Check if we have phone numbers from text input or Excel file
+            const phoneNumbersText = req.body.phoneNumbers;
+            if (phoneNumbersText) {
+                // Parse phone numbers from text input
+                const phoneNumbersList = phoneNumbersText
+                    .split('\n')
+                    .map(num => num.trim())
+                    .filter(num => num.length > 0);
                     
+                // Validate and format phone numbers
+                for (let i = 0; i < phoneNumbersList.length; i++) {
+                    const formattedNumber = validateAndFormatPhoneNumber(phoneNumbersList[i], i);
                     if (formattedNumber) {
                         phoneNumbers.push(formattedNumber);
                     }
                 }
-            }
+                    
+                if (phoneNumbers.length === 0) {
+                    fs.unlinkSync(req.files.mediaFile[0].path);
+                    return res.status(400).json({ error: 'No valid phone numbers found' });
+                }
+            } else if (req.files.excelFile) {
+                // Fallback to Excel file if no text input
+                const workbook = xlsx.readFile(req.files.excelFile[0].path);
+                const sheetName = workbook.SheetNames[0];
+                const worksheet = workbook.Sheets[sheetName];
+                const data = xlsx.utils.sheet_to_json(worksheet, { header: 1 });
 
-            if (phoneNumbers.length === 0) {
-                fs.unlinkSync(req.files.excelFile[0].path);
+                // Extract phone numbers (assuming they are in the first column)
+                for (let i = 0; i < data.length; i++) {
+                    if (data[i][0]) {
+                        const phoneNumber = data[i][0].toString().trim();
+                        const formattedNumber = validateAndFormatPhoneNumber(phoneNumber, i);
+                        
+                        if (formattedNumber) {
+                            phoneNumbers.push(formattedNumber);
+                        }
+                    }
+                }
+
+                if (phoneNumbers.length === 0) {
+                    fs.unlinkSync(req.files.excelFile[0].path);
+                    fs.unlinkSync(req.files.mediaFile[0].path);
+                    return res.status(400).json({ error: 'No valid phone numbers found in the Excel file' });
+                }
+            } else {
                 fs.unlinkSync(req.files.mediaFile[0].path);
-                return res.status(400).json({ error: 'No valid phone numbers found in the Excel file' });
+                return res.status(400).json({ error: 'Phone numbers are required for media messages' });
             }
             
             // Create MessageMedia from uploaded file with proper filename handling
@@ -1092,8 +1139,14 @@ app.post('/api/upload-and-send', upload.fields([
         // Store campaign state for pause/resume functionality
         if (campaignId) {
             // Create tracking file for this campaign
-            const excelFilePath = req.files.excelFile[0].path;
-            createTrackingFile(campaignId, phoneNumbers, excelFilePath);
+            let trackingFilePath;
+            if (req.files && req.files.excelFile) {
+                trackingFilePath = req.files.excelFile[0].path;
+            } else {
+                // For text input, create a temporary tracking file
+                trackingFilePath = `./temp_${campaignId}_tracking.xlsx`;
+            }
+            createTrackingFile(campaignId, phoneNumbers, trackingFilePath);
             
             const campaignState = {
                 campaignId: campaignId,
@@ -1101,6 +1154,7 @@ app.post('/api/upload-and-send', upload.fields([
                 message: message,
                 mediaFile: mediaFile,
                 fileType: fileType,
+                delayRange: delayRange,
                 currentIndex: 0,
                 sentCount: 0,
                 failedCount: 0,
@@ -1138,7 +1192,7 @@ app.post('/api/upload-and-send', upload.fields([
             }, 2000); // 2 second delay
         } else {
             // For non-campaign messages, send immediately
-            await sendMessagesSequentially(phoneNumbers, message, mediaFile, campaignId);
+            await sendMessagesSequentially(phoneNumbers, message, campaignId, 0, delayRange);
         }
 
         // Only emit completion for non-campaign messages (campaign messages will emit completion in sendMessagesSequentially)
@@ -1204,6 +1258,12 @@ function getRandomDelay(min, max) {
     return Math.floor(Math.random() * (max - min + 1)) + min;
 }
 
+// Helper function to parse delay range from string (e.g., "30-60" -> [30000, 60000])
+function parseDelayRange(delayString) {
+    const [min, max] = delayString.split('-').map(num => parseInt(num));
+    return [min * 1000, max * 1000]; // Convert seconds to milliseconds
+}
+
 // Helper function to calculate realistic typing duration based on message length
 function calculateTypingDuration(message) {
     // Base typing speed: ~40-60 characters per minute (human average)
@@ -1234,19 +1294,74 @@ function calculateReadingTime(message) {
     return Math.max(1000, Math.min(10000, readingTimeMs));
 }
 
+// Puppeteer-based message sending strategy using URL method (text messages only)
+// This implements the WhatsApp URL method exactly as in the working test code
+async function sendMessageWithPuppeteer(phoneNumber, message) {
+    try {
+        console.log(`Using Puppeteer URL method to send message to ${phoneNumber}`);
+        
+        // Validate client and page
+        if (!client || !client.pupPage || client.pupPage.isClosed()) {
+            throw new Error('WhatsApp client or page is not available');
+        }
+        
+        // Get the phone number without @c.us suffix for URL
+        const cleanPhoneNumber = phoneNumber.replace('@c.us', '');
+        
+        // Encode the message for URL (exactly as in test code)
+        const encodedMessage = encodeURIComponent(message);
+        
+        // Create WhatsApp Web URL (exactly as in test code)
+        const whatsappUrl = `https://web.whatsapp.com/send?phone=${cleanPhoneNumber}&text=${encodedMessage}`;
+        
+        console.log(`Navigating to WhatsApp URL: ${whatsappUrl}`);
+        
+        // Navigate to the WhatsApp URL using the existing client's page (exactly as in test code)
+        await client.pupPage.goto(whatsappUrl, { waitUntil: 'networkidle2' });
+        
+        // Wait for the message input box (exactly as in test code)
+        console.log('Waiting for message input box...');
+        const inputBox = await client.pupPage.waitForSelector('div[contenteditable="true"][data-tab="10"]', { timeout: 30000 });
+        
+        // Wait a bit for the page to fully load (exactly as in test code)
+        await client.pupPage.waitForTimeout(3000);
+        
+        // Send the message by pressing Enter (exactly as in test code)
+        console.log('Sending message...');
+        await inputBox.press('Enter');
+        
+        // Wait for message to be sent (exactly as in test code)
+        await client.pupPage.waitForTimeout(2000);
+        
+        console.log(`✓ Message sent successfully to ${phoneNumber} using Puppeteer URL method!`);
+        return true;
+        
+    } catch (error) {
+        console.error(`Error sending message with Puppeteer to ${phoneNumber}:`, error.message);
+        throw error;
+    }
+}
+
 // Helper function to add human-like variations to behavior
 
 // Campaign file management functions
 function createTrackingFile(campaignId, phoneNumbers, originalFilePath) {
     try {
-        // Create a copy of the original file for tracking
-        const trackingPath = originalFilePath.replace('.xlsx', '_tracking.xlsx');
-        const trackingPath2 = originalFilePath.replace('.xls', '_tracking.xlsx');
-        const trackingPath3 = originalFilePath.replace('.csv', '_tracking.xlsx');
+        let finalTrackingPath;
         
-        let finalTrackingPath = trackingPath;
-        if (fs.existsSync(trackingPath2)) finalTrackingPath = trackingPath2;
-        if (fs.existsSync(trackingPath3)) finalTrackingPath = trackingPath3;
+        // Check if this is a temporary file path (for text input)
+        if (originalFilePath.startsWith('./temp_')) {
+            finalTrackingPath = originalFilePath;
+        } else {
+            // Create a copy of the original file for tracking
+            const trackingPath = originalFilePath.replace('.xlsx', '_tracking.xlsx');
+            const trackingPath2 = originalFilePath.replace('.xls', '_tracking.xlsx');
+            const trackingPath3 = originalFilePath.replace('.csv', '_tracking.xlsx');
+            
+            finalTrackingPath = trackingPath;
+            if (fs.existsSync(trackingPath2)) finalTrackingPath = trackingPath2;
+            if (fs.existsSync(trackingPath3)) finalTrackingPath = trackingPath3;
+        }
         
         // Create workbook with tracking data
         const workbook = xlsx.utils.book_new();
@@ -1392,13 +1507,13 @@ async function continueCampaign(campaignId) {
     await sendMessagesSequentially(
         pendingPhoneNumbers,
         campaignState.message,
-        campaignState.mediaFile,
         campaignId,
-        0 // Start from 0 since we're only processing pending numbers
+        0, // Start from 0 since we're only processing pending numbers
+        campaignState.delayRange || '1800-3600'
     );
 }
 
-async function sendMessagesSequentially(phoneNumbers, message, mediaFile, campaignId = null, startIndex = 0) {
+async function sendMessagesSequentially(phoneNumbers, message, campaignId = null, startIndex = 0, delayRange = "1800-3600") {
     const results = [];
     let successCount = 0;
     let failureCount = 0;
@@ -1460,187 +1575,72 @@ async function sendMessagesSequentially(phoneNumbers, message, mediaFile, campai
                 await new Promise(resolve => setTimeout(resolve, preDelay));
             }
 
-            // Check if number is registered on WhatsApp
-            console.log(`Checking if ${phoneNumber} is registered...`);
-            io.emit('human_behavior', {
-                number: phoneNumber,
-                action: 'checking_registration',
-                progress: currentIndex + 1,
+            // Use Puppeteer URL method directly (no registration check, no typing indicators)
+            console.log(`Sending message to ${phoneNumber} using URL method...`);
+            
+            let messageSent = false;
+            let sendAttempts = 0;
+            const maxAttempts = 3;
+            
+            while (!messageSent && sendAttempts < maxAttempts) {
+                try {
+                    sendAttempts++;
+                    console.log(`Send attempt ${sendAttempts}/${maxAttempts} for ${phoneNumber}`);
+            
+                    // Use Puppeteer URL method for sending text messages
+                    await sendMessageWithPuppeteer(phoneNumber, message);
+                    
+                    messageSent = true;
+                    console.log(`Message sent successfully to ${phoneNumber}`);
+                    
+                } catch (sendError) {
+                    console.error(`Send attempt ${sendAttempts} failed for ${phoneNumber}:`, sendError.message);
+                    
+                    if (sendAttempts < maxAttempts) {
+                        // Wait before retry
+                        const retryDelay = getRandomDelay(2000, 5000);
+                        console.log(`Retrying in ${retryDelay/1000}s...`);
+                        await new Promise(resolve => setTimeout(resolve, retryDelay));
+                        
+                        // Re-validate connection before retry
+                        try {
+                            await validateConnection();
+                        } catch (stateError) {
+                            console.error('Connection validation failed during retry:', stateError.message);
+                            throw new Error('WhatsApp client connection lost during retry');
+                        }
+                    } else {
+                        throw sendError;
+                    }
+                }
+            }
+            
+            results.push({ number: phoneNumber, status: 'sent', error: null });
+            successCount++;
+            
+            // Update campaign state
+            if (campaignId) {
+                const campaignState = activeCampaigns.get(campaignId);
+                if (campaignState) {
+                    campaignState.sentCount++;
+                    campaignState.lastActivity = new Date();
+                }
+                // Update tracking file
+                updateTrackingFile(campaignId, phoneNumber, 'Sent');
+            }
+            
+            io.emit('message_sent', { 
+                number: phoneNumber, 
+                status: 'sent', 
+                progress: currentIndex + 1, 
                 total: phoneNumbers.length + startIndex,
                 campaignId: campaignId
             });
-
-            let isRegistered;
-            try {
-                isRegistered = await client.isRegisteredUser(phoneNumber);
-            } catch (registrationError) {
-                console.error(`Error checking registration for ${phoneNumber}:`, registrationError.message);
-                throw new Error('Failed to check if number is registered on WhatsApp');
-            }
             
-            if (isRegistered) {
-                // Human behavior: Show as online/available
-                console.log(`Setting presence as available...`);
-                try {
-                    await client.sendPresenceAvailable();
-                } catch (err) {
-                    console.log('Could not set presence (non-critical):', err.message);
-                }
-                
-                io.emit('human_behavior', {
-                    number: phoneNumber,
-                    action: 'online',
-                    progress: currentIndex + 1,
-                    total: phoneNumbers.length + startIndex,
-                    campaignId: campaignId
-                });
-
-                // Human behavior: Random thinking time (2-8 seconds)
-                const thinkingTime = getRandomDelay(2000, 8000);
-                console.log(`Thinking for ${thinkingTime/1000}s before typing...`);
-                
-                io.emit('human_behavior', {
-                    number: phoneNumber,
-                    action: 'thinking',
-                    duration: thinkingTime,
-                    progress: currentIndex + 1,
-                    total: phoneNumbers.length + startIndex,
-                    campaignId: campaignId
-                });
-                
-                await new Promise(resolve => setTimeout(resolve, thinkingTime));
-
-                // Human behavior: Show typing indicator
-                console.log(`Showing typing indicator for ${phoneNumber}...`);
-                io.emit('human_behavior', {
-                    number: phoneNumber,
-                    action: 'typing',
-                    progress: currentIndex + 1,
-                    total: phoneNumbers.length + startIndex,
-                    campaignId: campaignId
-                });
-
-                try {
-                    // Try to get chat and send typing indicator
-                    let chat = null;
-                    try {
-                        chat = await client.getChatById(phoneNumber);
-                    await chat.sendStateTyping();
-                    } catch (chatError) {
-                        console.log(`Could not get chat or send typing indicator for ${phoneNumber}, proceeding without typing indicator`);
-                    }
-                    
-                    // Calculate typing duration based on message length (human-like)
-                    const typingDuration = calculateTypingDuration(message);
-                    console.log(`Typing for ${typingDuration/1000}s (message length: ${message.length} chars)...`);
-                    
-                    await new Promise(resolve => setTimeout(resolve, typingDuration));
-                    
-                    // Stop typing and send message
-                    console.log(`Sending message to ${phoneNumber}...`);
-                    
-                    let messageSent = false;
-                    let sendAttempts = 0;
-                    const maxAttempts = 3;
-                    
-                    while (!messageSent && sendAttempts < maxAttempts) {
-                        try {
-                            sendAttempts++;
-                            console.log(`Send attempt ${sendAttempts}/${maxAttempts} for ${phoneNumber}`);
-                    
-                    if (mediaFile) {
-                        // Send media message with caption
-                        console.log(`Sending media file: ${mediaFile.filename} to ${phoneNumber}`);
-                        await client.sendMessage(phoneNumber, mediaFile, { caption: message });
-                    } else {
-                        // Send text message
-                        await client.sendMessage(phoneNumber, message);
-                    }
-                    
-                            messageSent = true;
-                            console.log(`Message sent successfully to ${phoneNumber}`);
-                            
-                        } catch (sendError) {
-                            console.error(`Send attempt ${sendAttempts} failed for ${phoneNumber}:`, sendError.message);
-                            
-                            if (sendAttempts < maxAttempts) {
-                                // Wait before retry
-                                const retryDelay = getRandomDelay(2000, 5000);
-                                console.log(`Retrying in ${retryDelay/1000}s...`);
-                                await new Promise(resolve => setTimeout(resolve, retryDelay));
-                                
-                                // Re-validate connection before retry
-                                try {
-                                    await validateConnection();
-                                } catch (stateError) {
-                                    console.error('Connection validation failed during retry:', stateError.message);
-                                    throw new Error('WhatsApp client connection lost during retry');
-                                }
-                    } else {
-                                throw sendError;
-                            }
-                        }
-                    }
-                    
-                    results.push({ number: phoneNumber, status: 'sent', error: null });
-                    successCount++;
-                    
-                    // Update campaign state
-                    if (campaignId) {
-                        const campaignState = activeCampaigns.get(campaignId);
-                        if (campaignState) {
-                            campaignState.sentCount++;
-                            campaignState.lastActivity = new Date();
-                        }
-                        // Update tracking file
-                        updateTrackingFile(campaignId, phoneNumber, 'Sent');
-                    }
-                    
-                    io.emit('message_sent', { 
-                        number: phoneNumber, 
-                        status: 'sent', 
-                        progress: currentIndex + 1, 
-                        total: phoneNumbers.length + startIndex,
-                        humanBehavior: true,
-                        campaignId: campaignId
-                    });
-
-                    // Human behavior: Brief pause after sending (1-3 seconds)
-                    const postSendDelay = getRandomDelay(1000, 3000);
-                    await new Promise(resolve => setTimeout(resolve, postSendDelay));
-
-                } catch (messageError) {
-                    console.error(`Failed to send message to ${phoneNumber} after ${maxAttempts} attempts:`, messageError.message);
-                    throw messageError;
-                }
-
-            } else {
-                results.push({ number: phoneNumber, status: 'not_registered', error: 'Number not registered on WhatsApp' });
-                failureCount++;
-                
-                // Update campaign state
-                if (campaignId) {
-                    const campaignState = activeCampaigns.get(campaignId);
-                    if (campaignState) {
-                        campaignState.failedCount++;
-                        campaignState.lastActivity = new Date();
-                    }
-                    // Update tracking file
-                    updateTrackingFile(campaignId, phoneNumber, 'Failed', 'Number not registered on WhatsApp');
-                }
-                
-                io.emit('message_sent', { 
-                    number: phoneNumber, 
-                    status: 'not_registered', 
-                    progress: currentIndex + 1, 
-                    total: phoneNumbers.length + startIndex,
-                    campaignId: campaignId
-                });
-            }
-            
-            // Human behavior: Random delay between messages (1800-2400 seconds)
+            // Human behavior: Random delay between messages (configurable)
             if (i < phoneNumbers.length - 1) { // Don't delay after the last message
-                const humanDelay = getRandomDelay(1800000, 2400000); // 1800-2400 seconds (30-40 minutes)
+                const [minDelay, maxDelay] = parseDelayRange(delayRange);
+                const humanDelay = getRandomDelay(minDelay, maxDelay);
                 console.log(`Human-like delay: waiting ${humanDelay/1000}s before next message...`);
                 
                 io.emit('human_behavior', {

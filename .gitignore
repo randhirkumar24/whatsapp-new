@@ -48,6 +48,9 @@ screenshot-*.jpg
 browser-data/
 user-data/
 
+# Temporary media files
+temp_media/
+
 # Environment variables and configuration
 .env
 .env.local

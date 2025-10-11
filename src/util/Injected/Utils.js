@@ -242,14 +242,14 @@ exports.LoadUtils = () => {
         }
 
         const lidUser = window.Store.User.getMaybeMeLidUser();
-        const meUser = window.Store.User.getMaybeMePnUser();
+        const meUser = window.Store.User.getMaybeMeUser();
         const newId = await window.Store.MsgKey.newId();
         let from = chat.id.isLid() ? lidUser : meUser;
         let participant;
 
         if (typeof chat.id?.isGroup === 'function' && chat.id.isGroup()) {
             from = chat.groupMetadata && chat.groupMetadata.isLidAddressingMode ? lidUser : meUser;
-            participant = window.Store.WidFactory.asUserWidOrThrow(from);
+            participant = window.Store.WidFactory.toUserWidOrThrow(from);
         }
 
         const newMsgKey = new window.Store.MsgKey({
@@ -523,6 +523,15 @@ exports.LoadUtils = () => {
         return msg;
     };
 
+    window.WWebJS.getPollVoteModel = async (vote) => {
+        const _vote = vote.serialize();
+        if (!vote.parentMsgKey) return null;
+        const msg =
+            window.Store.Msg.get(vote.parentMsgKey) || (await window.Store.Msg.getMessagesById([vote.parentMsgKey]))?.messages?.[0];
+        msg && (_vote.parentMessage = window.WWebJS.getMessageModel(msg));
+        return _vote;
+    };
+
     window.WWebJS.getChat = async (chatId, { getAsModel = true } = {}) => {
         const isChannel = /@\w*newsletter\b/.test(chatId);
         const chatWid = window.Store.WidFactory.createWid(chatId);
@@ -539,7 +548,7 @@ exports.LoadUtils = () => {
                 chat = null;
             }
         } else {
-            chat = window.Store.Chat.get(chatWid) || (await window.Store.FindOrCreateChat.findOrCreateLatestChat(chatWid))?.chat;
+            chat = window.Store.Chat.get(chatWid) || (await window.Store.Chat.find(chatWid));
         }
 
         return getAsModel && chat
@@ -839,7 +848,7 @@ exports.LoadUtils = () => {
 
     window.WWebJS.rejectCall = async (peerJid, id) => {
         peerJid = peerJid.split('@')[0] + '@s.whatsapp.net';
-        let userId = window.Store.User.getMaybeMePnUser().user + '@s.whatsapp.net';
+        let userId = window.Store.User.getMaybeMeUser().user + '@s.whatsapp.net';
         const stanza = window.Store.SocketWap.wap('call', {
             id: window.Store.SocketWap.generateId(),
             from: window.Store.SocketWap.USER_JID(userId),
@@ -1143,27 +1152,5 @@ exports.LoadUtils = () => {
     window.WWebJS.getAllStatuses = () => {
         const statuses = window.Store.Status.getModelsArray();
         return statuses.map(status => window.WWebJS.getStatusModel(status));
-    };
-
-    window.WWebJS.enforceLidAndPnRetrieval = async (userId) => {
-        const wid = window.Store.WidFactory.createWid(userId);
-        const isLid = wid.server === 'lid';
-
-        let lid = isLid ? wid : window.Store.LidUtils.getCurrentLid(wid);
-        let phone = isLid ? window.Store.LidUtils.getPhoneNumber(wid) : wid;
-
-        if (!isLid && !lid) {
-            const queryResult = await window.Store.QueryExist(wid);
-            if (!queryResult?.wid) return {};
-            lid = window.Store.LidUtils.getCurrentLid(wid);
-        }
-
-        if (isLid && !phone) {
-            const queryResult = await window.Store.QueryExist(wid);
-            if (!queryResult?.wid) return {};
-            phone = window.Store.LidUtils.getPhoneNumber(wid);
-        }
-
-        return { lid, phone };
     };
 };
