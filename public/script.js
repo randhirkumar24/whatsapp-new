@@ -80,6 +80,9 @@ document.addEventListener('DOMContentLoaded', function() {
     // Request initial status
     requestStatus();
     
+    // Set up console log monitoring for campaign progress
+    setupConsoleLogMonitoring();
+    
     // Set up session timeout check (every 5 minutes)
     setInterval(checkSessionTimeout, 5 * 60 * 1000);
 });
@@ -1515,5 +1518,244 @@ async function resumeCampaign(campaignId) {
             updateCampaignDisplay();
         }
     });
+
+// Console Log Monitoring for Campaign Progress
+let consoleLogBuffer = [];
+let lastLogTime = Date.now();
+
+function setupConsoleLogMonitoring() {
+    console.log('🔍 Setting up console log monitoring for campaign progress...');
+    
+    // Override console.log to capture logs
+    const originalConsoleLog = console.log;
+    const originalConsoleError = console.error;
+    const originalConsoleWarn = console.warn;
+    
+    console.log = function(...args) {
+        originalConsoleLog.apply(console, args);
+        captureConsoleLog('log', args);
+    };
+    
+    console.error = function(...args) {
+        originalConsoleError.apply(console, args);
+        captureConsoleLog('error', args);
+    };
+    
+    console.warn = function(...args) {
+        originalConsoleWarn.apply(console, args);
+        captureConsoleLog('warn', args);
+    };
+    
+    // Set up periodic log processing
+    setInterval(processConsoleLogs, 2000); // Process logs every 2 seconds
+    
+    // Also listen for new logs in real-time
+    window.addEventListener('error', (event) => {
+        captureConsoleLog('error', [event.error?.message || event.message]);
+    });
+}
+
+function captureConsoleLog(type, args) {
+    const timestamp = Date.now();
+    const message = args.map(arg => 
+        typeof arg === 'object' ? JSON.stringify(arg) : String(arg)
+    ).join(' ');
+    
+    consoleLogBuffer.push({
+        type: type,
+        message: message,
+        timestamp: timestamp
+    });
+    
+    // Keep only last 100 logs to prevent memory issues
+    if (consoleLogBuffer.length > 100) {
+        consoleLogBuffer = consoleLogBuffer.slice(-100);
+    }
+}
+
+function processConsoleLogs() {
+    const now = Date.now();
+    const recentLogs = consoleLogBuffer.filter(log => log.timestamp > lastLogTime);
+    lastLogTime = now;
+    
+    recentLogs.forEach(log => {
+        parseCampaignLog(log.message);
+    });
+}
+
+function parseCampaignLog(message) {
+    // Parse campaign start logs
+    if (message.includes('Starting campaign') && message.includes('...')) {
+        const campaignMatch = message.match(/Starting campaign (campaign_\d+)/);
+        if (campaignMatch) {
+            const campaignId = campaignMatch[1];
+            showCampaignProgress(campaignId);
+            addLogEntry(`🚀 Campaign ${campaignId} started`);
+        }
+    }
+    
+    // Parse progress logs
+    if (message.includes('Campaign') && message.includes('Status:')) {
+        const campaignMatch = message.match(/Campaign (campaign_\d+) Status:/);
+        if (campaignMatch) {
+            const campaignId = campaignMatch[1];
+            updateCampaignFromLog(campaignId, message);
+        }
+    }
+    
+    // Parse message sent logs
+    if (message.includes('Message sent successfully to') && message.includes('@c.us')) {
+        const phoneMatch = message.match(/Message sent successfully to (\d+@c\.us)/);
+        if (phoneMatch) {
+            updateProgressCount('sent');
+            addLogEntry(`✅ Message sent to ${phoneMatch[1]}`);
+        }
+    }
+    
+    // Parse failed message logs
+    if (message.includes('Number') && message.includes('is not available on WhatsApp')) {
+        const phoneMatch = message.match(/Number (\d+@c\.us) is not available on WhatsApp/);
+        if (phoneMatch) {
+            updateProgressCount('failed');
+            addLogEntry(`📱 Number ${phoneMatch[1]} not available`);
+        }
+    }
+    
+    // Parse campaign completion logs
+    if (message.includes('Campaign') && message.includes('Summary:')) {
+        const campaignMatch = message.match(/Campaign (campaign_\d+) Summary:/);
+        if (campaignMatch) {
+            const campaignId = campaignMatch[1];
+            handleCampaignCompletion(campaignId, message);
+        }
+    }
+    
+    // Parse connection status logs
+    if (message.includes('WhatsApp Client is ready!')) {
+        addLogEntry('🟢 WhatsApp connection established');
+    }
+    
+    if (message.includes('WhatsApp Client authenticated')) {
+        addLogEntry('🔐 WhatsApp authentication successful');
+    }
+}
+
+function showCampaignProgress(campaignId) {
+    showProgressSection();
+    addLogEntry(`📊 Monitoring campaign ${campaignId} progress...`);
+}
+
+function updateCampaignFromLog(campaignId, logMessage) {
+    // Extract progress information from log
+    const progressMatch = logMessage.match(/Progress: (\d+)\/(\d+)/);
+    const sentMatch = logMessage.match(/Sent: (\d+)/);
+    const failedMatch = logMessage.match(/Failed: (\d+)/);
+    
+    if (progressMatch && sentMatch && failedMatch) {
+        const current = parseInt(progressMatch[1]);
+        const total = parseInt(progressMatch[2]);
+        const sent = parseInt(sentMatch[1]);
+        const failed = parseInt(failedMatch[1]);
+        const progress = Math.round((current / total) * 100);
+        
+        updateProgressDisplay({
+            progressPercentage: progress,
+            progress: {
+                current: current,
+                total: total,
+                sent: sent,
+                failed: failed
+            }
+        });
+        
+        addLogEntry(`📈 Campaign ${campaignId}: ${progress}% complete (${sent} sent, ${failed} failed)`);
+    }
+}
+
+function updateProgressCount(type) {
+    if (type === 'sent') {
+        const currentSent = parseInt(successCount?.textContent || '0');
+        if (successCount) successCount.textContent = currentSent + 1;
+    } else if (type === 'failed') {
+        const currentFailed = parseInt(failureCount?.textContent || '0');
+        if (failureCount) failureCount.textContent = currentFailed + 1;
+    }
+    
+    // Update progress bar
+    const total = parseInt(totalCount?.textContent || '0');
+    const sent = parseInt(successCount?.textContent || '0');
+    const failed = parseInt(failureCount?.textContent || '0');
+    const current = sent + failed;
+    
+    if (total > 0) {
+        const progress = Math.round((current / total) * 100);
+        if (progressFill) progressFill.style.width = `${progress}%`;
+        if (progressText) progressText.textContent = `${progress}%`;
+    }
+}
+
+function handleCampaignCompletion(campaignId, logMessage) {
+    addLogEntry(`🎉 Campaign ${campaignId} completed!`);
+    
+    // Extract final stats
+    const sentMatch = logMessage.match(/Successfully sent: (\d+)/);
+    const unavailableMatch = logMessage.match(/Unavailable numbers: (\d+)/);
+    const connectionMatch = logMessage.match(/Connection issues: (\d+)/);
+    const generalMatch = logMessage.match(/General failures: (\d+)/);
+    
+    if (sentMatch) {
+        addLogEntry(`✅ Final results: ${sentMatch[1]} messages sent successfully`);
+    }
+    if (unavailableMatch) {
+        addLogEntry(`📱 ${unavailableMatch[1]} numbers were unavailable`);
+    }
+    if (connectionMatch) {
+        addLogEntry(`🔌 ${connectionMatch[1]} connection issues occurred`);
+    }
+    if (generalMatch) {
+        addLogEntry(`❌ ${generalMatch[1]} general failures`);
+    }
+}
+
+function showProgressSection() {
+    if (progressSection) {
+        progressSection.style.display = 'block';
+    }
+}
+
+function updateProgressDisplay(campaign) {
+    if (!campaign) return;
+    
+    // Update progress bar
+    if (progressFill) {
+        progressFill.style.width = `${campaign.progressPercentage}%`;
+    }
+    
+    // Update progress text
+    if (progressText) {
+        progressText.textContent = `${campaign.progressPercentage}%`;
+    }
+    
+    // Update counts
+    if (totalCount) {
+        totalCount.textContent = campaign.progress.total;
+    }
+    if (successCount) {
+        successCount.textContent = campaign.progress.sent;
+    }
+    if (failureCount) {
+        failureCount.textContent = campaign.progress.failed;
+    }
+}
+
+function addLogEntry(message) {
+    if (logContent) {
+        const logEntry = document.createElement('div');
+        logEntry.className = 'log-entry';
+        logEntry.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+        logContent.appendChild(logEntry);
+        logContent.scrollTop = logContent.scrollHeight;
+    }
+}
 
 

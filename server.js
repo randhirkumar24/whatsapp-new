@@ -52,8 +52,7 @@ let clientInstanceId = null;
 let activeCampaigns = new Map(); // campaignId -> campaign state
 let pausedCampaigns = new Map(); // campaignId -> paused campaign state
 
-// Campaign file tracking
-let campaignFiles = new Map(); // campaignId -> { originalPath, trackingPath }
+// No campaign file tracking needed
 
 // Enhanced connection management
 let keepAliveInterval = null;
@@ -61,6 +60,9 @@ let connectionHealthCheckInterval = null;
 let lastSuccessfulConnection = Date.now();
 let connectionFailureCount = 0;
 const MAX_CONNECTION_FAILURES = 3;
+
+// Campaign health monitoring
+let campaignHealthInterval = null;
 
 function startKeepAlive() {
     // Clear any existing keep-alive
@@ -124,12 +126,53 @@ function startConnectionHealthCheck() {
     }, 30 * 1000); // 30 seconds
 }
 
+function startCampaignHealthMonitoring() {
+    // Clear any existing health monitoring
+    if (campaignHealthInterval) {
+        clearInterval(campaignHealthInterval);
+    }
+    
+    // Monitor campaign health every 5 minutes
+    campaignHealthInterval = setInterval(() => {
+        const now = Date.now();
+        
+        for (const [campaignId, campaignState] of activeCampaigns.entries()) {
+            if (!campaignState.isPaused) {
+                const timeSinceStart = now - campaignState.startedAt.getTime();
+                const timeSinceLastActivity = now - (campaignState.lastActivity || campaignState.startedAt.getTime());
+                
+                // Log campaign status every 5 minutes
+                console.log(`📊 Campaign ${campaignId} Status:`);
+                console.log(`   ⏱️  Running for: ${Math.floor(timeSinceStart / 60000)} minutes`);
+                console.log(`   📈 Progress: ${campaignState.sentCount + campaignState.failedCount}/${campaignState.phoneNumbers.length}`);
+                console.log(`   ✅ Sent: ${campaignState.sentCount}`);
+                console.log(`   ❌ Failed: ${campaignState.failedCount}`);
+                console.log(`   🔄 Last activity: ${Math.floor(timeSinceLastActivity / 60000)} minutes ago`);
+                
+                // Check for stuck campaigns (no activity for more than 10 minutes)
+                if (timeSinceLastActivity > 10 * 60 * 1000) {
+                    console.log(`⚠️ Campaign ${campaignId} appears stuck - no activity for ${Math.floor(timeSinceLastActivity / 60000)} minutes`);
+                    console.log(`🔄 Attempting to continue campaign...`);
+                    
+                    // Try to continue the campaign
+                    setTimeout(() => {
+                        continueCampaign(campaignId).catch(error => {
+                            console.error(`❌ Failed to continue stuck campaign ${campaignId}:`, error);
+                        });
+                    }, 5000);
+                }
+            }
+        }
+    }, 5 * 60 * 1000); // 5 minutes
+}
+
 async function forceReconnection() {
     console.log('Forcing WhatsApp client reconnection...');
     
     // Stop all intervals
     stopKeepAlive();
     stopConnectionHealthCheck();
+    stopCampaignHealthMonitoring();
     
     // Reset states
     isClientReady = false;
@@ -163,6 +206,13 @@ function stopKeepAlive() {
     if (keepAliveInterval) {
         clearInterval(keepAliveInterval);
         keepAliveInterval = null;
+    }
+}
+
+function stopCampaignHealthMonitoring() {
+    if (campaignHealthInterval) {
+        clearInterval(campaignHealthInterval);
+        campaignHealthInterval = null;
     }
 }
 
@@ -426,6 +476,7 @@ function initializeWhatsAppClient() {
             // Start enhanced connection management
             startKeepAlive();
             startConnectionHealthCheck();
+            startCampaignHealthMonitoring();
         });
 
         // Event: Loading screen
@@ -481,6 +532,7 @@ function initializeWhatsAppClient() {
             // Stop all connection management
             stopKeepAlive();
             stopConnectionHealthCheck();
+            stopCampaignHealthMonitoring();
             
             io.emit('disconnected', reason);
             io.emit('status', { 
@@ -934,6 +986,58 @@ app.get('/api/campaign/:campaignId/status', async (req, res) => {
     }
 });
 
+// API endpoint to get all active campaigns
+app.get('/api/campaigns/active', (req, res) => {
+    try {
+        const campaigns = [];
+        
+        // Get active campaigns
+        for (const [campaignId, campaignState] of activeCampaigns.entries()) {
+            campaigns.push({
+                campaignId: campaignId,
+                status: 'active',
+                progress: {
+                    current: campaignState.currentIndex + 1,
+                    total: campaignState.phoneNumbers.length,
+                    sent: campaignState.sentCount,
+                    failed: campaignState.failedCount
+                },
+                message: campaignState.message,
+                delayRange: campaignState.delayRange,
+                createdAt: campaignState.createdAt,
+                startedAt: campaignState.startedAt,
+                lastActivity: campaignState.lastActivity,
+                progressPercentage: Math.round(((campaignState.sentCount + campaignState.failedCount) / campaignState.phoneNumbers.length) * 100)
+            });
+        }
+        
+        // Get paused campaigns
+        for (const [campaignId, campaignState] of pausedCampaigns.entries()) {
+            campaigns.push({
+                campaignId: campaignId,
+                status: 'paused',
+                progress: {
+                    current: campaignState.currentIndex + 1,
+                    total: campaignState.phoneNumbers.length,
+                    sent: campaignState.sentCount,
+                    failed: campaignState.failedCount
+                },
+                message: campaignState.message,
+                delayRange: campaignState.delayRange,
+                createdAt: campaignState.createdAt,
+                startedAt: campaignState.startedAt,
+                lastActivity: campaignState.lastActivity,
+                progressPercentage: Math.round(((campaignState.sentCount + campaignState.failedCount) / campaignState.phoneNumbers.length) * 100)
+            });
+        }
+        
+        res.json({ campaigns: campaigns });
+    } catch (error) {
+        console.error('Error getting active campaigns:', error);
+        res.status(500).json({ error: 'Failed to get active campaigns' });
+    }
+});
+
 // Upload and send messages
 app.post('/api/upload-and-send', upload.fields([
     { name: 'mediaFile', maxCount: 1 },
@@ -1138,15 +1242,7 @@ app.post('/api/upload-and-send', upload.fields([
 
         // Store campaign state for pause/resume functionality
         if (campaignId) {
-            // Create tracking file for this campaign
-            let trackingFilePath;
-            if (req.files && req.files.excelFile) {
-                trackingFilePath = req.files.excelFile[0].path;
-            } else {
-                // For text input, create a temporary tracking file
-                trackingFilePath = `./temp_${campaignId}_tracking.xlsx`;
-            }
-            createTrackingFile(campaignId, phoneNumbers, trackingFilePath);
+            // No tracking file creation - just send messages directly
             
             const campaignState = {
                 campaignId: campaignId,
@@ -1164,6 +1260,10 @@ app.post('/api/upload-and-send', upload.fields([
                 lastActivity: new Date()
             };
             activeCampaigns.set(campaignId, campaignState);
+            
+            console.log(`💾 Campaign ${campaignId} state saved to server memory`);
+            console.log(`🔄 Campaign will run independently of browser connections`);
+            console.log(`📱 You can safely close your browser - messages will continue sending`);
         }
 
         // Send messages with human-like behavior
@@ -1179,10 +1279,14 @@ app.post('/api/upload-and-send', upload.fields([
             // Add a small delay to make it easier to test pause functionality
             setTimeout(async () => {
                 try {
-                    console.log(`Starting campaign ${campaignId}...`);
+                    console.log(`🚀 Starting campaign ${campaignId}...`);
+                    console.log(`📊 Campaign will process ${phoneNumbers.length} numbers with ${delayRange} delay range`);
+                    console.log(`💾 Campaign state stored in server memory - will continue even if browser is closed`);
+                    console.log(`⏰ Estimated completion time: ${Math.ceil(phoneNumbers.length * 0.75)} minutes`);
+                    
                     await continueCampaign(campaignId);
                 } catch (error) {
-                    console.error(`Error starting campaign ${campaignId}:`, error);
+                    console.error(`❌ Error starting campaign ${campaignId}:`, error);
                     // Emit error event to frontend
                     io.emit('campaign_error', { 
                         campaignId: campaignId, 
@@ -1294,6 +1398,36 @@ function calculateReadingTime(message) {
     return Math.max(1000, Math.min(10000, readingTimeMs));
 }
 
+// Helper function to detect if error indicates number is not available on WhatsApp
+function isNumberUnavailableError(error) {
+    const errorMessage = error.message.toLowerCase();
+    
+    // Common patterns that indicate number is not available on WhatsApp
+    const unavailablePatterns = [
+        'waiting for selector',
+        'timeout',
+        'navigation timeout',
+        'networkidle2',
+        'element not found',
+        'selector not found',
+        'page not found',
+        'invalid number',
+        'number not found',
+        'failed: waiting failed',
+        'exceeded',
+        'not available',
+        'unavailable',
+        'invalid phone number',
+        'phone number not found'
+    ];
+    
+    // Also check for specific timeout errors that are common with unavailable numbers
+    const isTimeoutError = errorMessage.includes('timeout') && 
+                          (errorMessage.includes('30000ms') || errorMessage.includes('15000ms'));
+    
+    return unavailablePatterns.some(pattern => errorMessage.includes(pattern)) || isTimeoutError;
+}
+
 // Puppeteer-based message sending strategy using URL method (text messages only)
 // This implements the WhatsApp URL method exactly as in the working test code
 async function sendMessageWithPuppeteer(phoneNumber, message, mediaFile = null) {
@@ -1321,9 +1455,9 @@ async function sendMessageWithPuppeteer(phoneNumber, message, mediaFile = null) 
             // Navigate to the WhatsApp URL using the existing client's page (exactly as in test code)
             await client.pupPage.goto(whatsappUrl, { waitUntil: 'networkidle2' });
             
-            // Wait for the message input box (exactly as in test code)
+            // Wait for the message input box with reduced timeout for faster failure detection
             console.log('Waiting for message input box...');
-            const inputBox = await client.pupPage.waitForSelector('div[contenteditable="true"][data-tab="10"]', { timeout: 30000 });
+            const inputBox = await client.pupPage.waitForSelector('div[contenteditable="true"][data-tab="10"]', { timeout: 15000 });
             
             // Wait a bit for the page to fully load (exactly as in test code)
             await client.pupPage.waitForTimeout(3000);
@@ -1398,117 +1532,11 @@ async function sendMessageWithPuppeteer(phoneNumber, message, mediaFile = null) 
 // Helper function to add human-like variations to behavior
 
 // Campaign file management functions
-function createTrackingFile(campaignId, phoneNumbers, originalFilePath) {
-    try {
-        let finalTrackingPath;
-        
-        // Check if this is a temporary file path (for text input)
-        if (originalFilePath.startsWith('./temp_')) {
-            finalTrackingPath = originalFilePath;
-        } else {
-            // Create a copy of the original file for tracking
-            const trackingPath = originalFilePath.replace('.xlsx', '_tracking.xlsx');
-            const trackingPath2 = originalFilePath.replace('.xls', '_tracking.xlsx');
-            const trackingPath3 = originalFilePath.replace('.csv', '_tracking.xlsx');
-            
-            finalTrackingPath = trackingPath;
-            if (fs.existsSync(trackingPath2)) finalTrackingPath = trackingPath2;
-            if (fs.existsSync(trackingPath3)) finalTrackingPath = trackingPath3;
-        }
-        
-        // Create workbook with tracking data
-        const workbook = xlsx.utils.book_new();
-        const trackingData = phoneNumbers.map((phone, index) => ({
-            'Phone Number': phone.replace('@c.us', ''),
-            'Status': 'Pending',
-            'Sent At': '',
-            'Error': ''
-        }));
-        
-        const worksheet = xlsx.utils.json_to_sheet(trackingData);
-        xlsx.utils.book_append_sheet(workbook, worksheet, 'Tracking');
-        xlsx.writeFile(workbook, finalTrackingPath);
-        
-        // Store file paths
-        campaignFiles.set(campaignId, {
-            originalPath: originalFilePath,
-            trackingPath: finalTrackingPath
-        });
-        
-        console.log(`Created tracking file for campaign ${campaignId}: ${finalTrackingPath}`);
-        return finalTrackingPath;
-    } catch (error) {
-        console.error('Error creating tracking file:', error);
-        return null;
-    }
-}
+// No tracking file creation needed - campaigns run without file tracking
 
-function updateTrackingFile(campaignId, phoneNumber, status, error = '') {
-    try {
-        const fileInfo = campaignFiles.get(campaignId);
-        if (!fileInfo || !fs.existsSync(fileInfo.trackingPath)) {
-            return false;
-        }
-        
-        // Read existing tracking file
-        const workbook = xlsx.readFile(fileInfo.trackingPath);
-        const worksheet = workbook.Sheets[workbook.SheetNames[0]];
-        const data = xlsx.utils.sheet_to_json(worksheet);
-        
-        // Update the specific phone number
-        const phoneWithoutSuffix = phoneNumber.replace('@c.us', '');
-        const rowIndex = data.findIndex(row => row['Phone Number'] === phoneWithoutSuffix);
-        
-        if (rowIndex !== -1) {
-            data[rowIndex]['Status'] = status;
-            data[rowIndex]['Sent At'] = status === 'Sent' ? new Date().toISOString() : '';
-            data[rowIndex]['Error'] = error;
-            
-            // Write back to file
-            const newWorksheet = xlsx.utils.json_to_sheet(data);
-            workbook.Sheets[workbook.SheetNames[0]] = newWorksheet;
-            xlsx.writeFile(workbook, fileInfo.trackingPath);
-            
-            console.log(`Updated tracking file: ${phoneWithoutSuffix} -> ${status}`);
-            return true;
-        }
-        
-        return false;
-    } catch (error) {
-        console.error('Error updating tracking file:', error);
-        return false;
-    }
-}
+// No tracking file updates needed
 
-function getPendingPhoneNumbers(campaignId) {
-    try {
-        const fileInfo = campaignFiles.get(campaignId);
-        if (!fileInfo || !fs.existsSync(fileInfo.trackingPath)) {
-            console.log(`No tracking file found for campaign ${campaignId}`);
-            return [];
-        }
-        
-        // Read tracking file
-        const workbook = xlsx.readFile(fileInfo.trackingPath);
-        const worksheet = workbook.Sheets[workbook.SheetNames[0]];
-        const data = xlsx.utils.sheet_to_json(worksheet);
-        
-        // Get only pending numbers
-        const pendingNumbers = data
-            .filter(row => row['Status'] === 'Pending')
-            .map(row => row['Phone Number'] + '@c.us');
-        
-        // Log detailed status for debugging
-        const sentCount = data.filter(row => row['Status'] === 'Sent').length;
-        const failedCount = data.filter(row => row['Status'] === 'Failed').length;
-        console.log(`Campaign ${campaignId} tracking: ${pendingNumbers.length} pending, ${sentCount} sent, ${failedCount} failed`);
-        
-        return pendingNumbers;
-    } catch (error) {
-        console.error('Error reading tracking file:', error);
-        return [];
-    }
-}
+// No pending phone number tracking needed - send to all numbers
 
 // Campaign management functions
 async function continueCampaign(campaignId) {
@@ -1528,40 +1556,26 @@ async function continueCampaign(campaignId) {
         return;
     }
     
-    // Get pending phone numbers from tracking file
-    const pendingPhoneNumbers = getPendingPhoneNumbers(campaignId);
+    // Send to all numbers in the campaign (no tracking file needed)
+    const allPhoneNumbers = campaignState.phoneNumbers;
     
-    if (pendingPhoneNumbers.length === 0) {
-        console.log(`No pending numbers found for campaign ${campaignId}`);
-        return;
-    }
-    
-    console.log(`Continuing campaign ${campaignId} with ${pendingPhoneNumbers.length} pending numbers`);
+    console.log(`Continuing campaign ${campaignId} with ${allPhoneNumbers.length} numbers`);
     
     // Emit bulk_send_start event for frontend
     io.emit('bulk_send_start', { 
         total: campaignState.phoneNumbers.length, 
         campaignId: campaignId,
-        pending: pendingPhoneNumbers.length,
+        pending: allPhoneNumbers.length,
         sent: campaignState.sentCount,
         failed: campaignState.failedCount
     });
     
-    // Verify campaign state consistency
-    const totalNumbers = campaignState.phoneNumbers.length;
-    const expectedPending = totalNumbers - campaignState.sentCount - campaignState.failedCount;
-    
-    if (pendingPhoneNumbers.length !== expectedPending) {
-        console.warn(`Tracking file inconsistency detected! Expected ${expectedPending} pending, found ${pendingPhoneNumbers.length}`);
-        console.warn(`Campaign state: sent=${campaignState.sentCount}, failed=${campaignState.failedCount}, total=${totalNumbers}`);
-    }
-    
-    // Start sending messages to pending numbers only
+    // Start sending messages to all numbers
     await sendMessagesSequentially(
-        pendingPhoneNumbers,
+        allPhoneNumbers,
         campaignState.message,
         campaignId,
-        0, // Start from 0 since we're only processing pending numbers
+        0, // Start from beginning
         campaignState.delayRange || '1800-3600',
         campaignState.mediaFile
     );
@@ -1587,24 +1601,7 @@ async function sendMessagesSequentially(phoneNumbers, message, campaignId = null
             // Update current index in campaign state
             campaignState.currentIndex = currentIndex;
             
-            // Double-check if this number was already sent (extra safety check)
-            const phoneWithoutSuffix = phoneNumber.replace('@c.us', '');
-            const fileInfo = campaignFiles.get(campaignId);
-            if (fileInfo && fs.existsSync(fileInfo.trackingPath)) {
-                try {
-                    const workbook = xlsx.readFile(fileInfo.trackingPath);
-                    const worksheet = workbook.Sheets[workbook.SheetNames[0]];
-                    const data = xlsx.utils.sheet_to_json(worksheet);
-                    const row = data.find(row => row['Phone Number'] === phoneWithoutSuffix);
-                    
-                    if (row && row['Status'] === 'Sent') {
-                        console.log(`Skipping ${phoneNumber} - already sent according to tracking file`);
-                        continue; // Skip this number as it's already sent
-                    }
-                } catch (error) {
-                    console.log(`Could not verify tracking file for ${phoneNumber}, proceeding anyway`);
-                }
-            }
+            // No tracking file verification - send to all numbers
         }
         
         try {
@@ -1634,9 +1631,11 @@ async function sendMessagesSequentially(phoneNumbers, message, campaignId = null
             
             let messageSent = false;
             let sendAttempts = 0;
+            // Smart retry logic: only retry for connection issues, not for unavailable numbers
             const maxAttempts = 3;
+            let shouldRetry = true;
             
-            while (!messageSent && sendAttempts < maxAttempts) {
+            while (!messageSent && sendAttempts < maxAttempts && shouldRetry) {
                 try {
                     sendAttempts++;
                     console.log(`Send attempt ${sendAttempts}/${maxAttempts} for ${phoneNumber}`);
@@ -1650,7 +1649,15 @@ async function sendMessagesSequentially(phoneNumbers, message, campaignId = null
                 } catch (sendError) {
                     console.error(`Send attempt ${sendAttempts} failed for ${phoneNumber}:`, sendError.message);
                     
-                    if (sendAttempts < maxAttempts) {
+                    // Check if this is a "number not available" error
+                    if (isNumberUnavailableError(sendError)) {
+                        console.log(`⚠️ Number ${phoneNumber} appears to be unavailable on WhatsApp - skipping retries`);
+                        shouldRetry = false; // Don't retry for unavailable numbers
+                        throw new Error(`Number not available on WhatsApp: ${sendError.message}`);
+                    }
+                    
+                    // Only retry for connection/network issues
+                    if (sendAttempts < maxAttempts && shouldRetry) {
                         // Wait before retry
                         const retryDelay = getRandomDelay(2000, 5000);
                         console.log(`Retrying in ${retryDelay/1000}s...`);
@@ -1679,8 +1686,6 @@ async function sendMessagesSequentially(phoneNumbers, message, campaignId = null
                     campaignState.sentCount++;
                     campaignState.lastActivity = new Date();
                 }
-                // Update tracking file
-                updateTrackingFile(campaignId, phoneNumber, 'Sent');
             }
             
             io.emit('message_sent', { 
@@ -1719,7 +1724,23 @@ async function sendMessagesSequentially(phoneNumbers, message, campaignId = null
             
         } catch (error) {
             console.error(`Error sending message to ${phoneNumber}:`, error);
-            results.push({ number: phoneNumber, status: 'failed', error: error.message });
+            
+            // Categorize the error for better tracking
+            let errorCategory = 'failed';
+            let errorMessage = error.message;
+            
+            if (isNumberUnavailableError(error)) {
+                errorCategory = 'unavailable';
+                errorMessage = 'Number not available on WhatsApp';
+                console.log(`📱 Number ${phoneNumber} is not available on WhatsApp`);
+            } else if (error.message.includes('connection') || error.message.includes('timeout')) {
+                errorCategory = 'connection';
+                console.log(`🔌 Connection issue for ${phoneNumber}`);
+            } else {
+                console.log(`❌ General error for ${phoneNumber}: ${error.message}`);
+            }
+            
+            results.push({ number: phoneNumber, status: errorCategory, error: errorMessage });
             failureCount++;
             
             // Update campaign state
@@ -1729,14 +1750,12 @@ async function sendMessagesSequentially(phoneNumbers, message, campaignId = null
                     campaignState.failedCount++;
                     campaignState.lastActivity = new Date();
                 }
-                // Update tracking file
-                updateTrackingFile(campaignId, phoneNumber, 'Failed', error.message);
             }
             
             io.emit('message_sent', { 
                 number: phoneNumber, 
-                status: 'failed', 
-                error: error.message,
+                status: errorCategory, 
+                error: errorMessage,
                 progress: currentIndex + 1, 
                 total: phoneNumbers.length + startIndex,
                 campaignId: campaignId
@@ -1748,14 +1767,30 @@ async function sendMessagesSequentially(phoneNumbers, message, campaignId = null
     if (campaignId) {
         const campaignState = activeCampaigns.get(campaignId);
         if (campaignState) {
+            // Calculate failure breakdown
+            const unavailableCount = results.filter(r => r.status === 'unavailable').length;
+            const connectionCount = results.filter(r => r.status === 'connection').length;
+            const generalCount = results.filter(r => r.status === 'failed').length;
+            
+            // Log campaign summary
+            console.log(`\n📊 Campaign ${campaignId} Summary:`);
+            console.log(`✅ Successfully sent: ${campaignState.sentCount}`);
+            console.log(`📱 Unavailable numbers: ${unavailableCount}`);
+            console.log(`🔌 Connection issues: ${connectionCount}`);
+            console.log(`❌ General failures: ${generalCount}`);
+            console.log(`📈 Total processed: ${campaignState.phoneNumbers.length}`);
+            
             // Remove from active campaigns
             activeCampaigns.delete(campaignId);
             
-            // Emit completion event
+            // Emit completion event with detailed breakdown
             io.emit('bulk_send_complete', { 
                 total: campaignState.phoneNumbers.length, 
                 success: campaignState.sentCount, 
                 failed: campaignState.failedCount,
+                unavailable: unavailableCount,
+                connection: connectionCount,
+                general: generalCount,
                 campaignId: campaignId
             });
             
@@ -1769,16 +1804,7 @@ async function sendMessagesSequentially(phoneNumbers, message, campaignId = null
                 }
             }
             
-            // Clean up tracking file
-            const fileInfo = campaignFiles.get(campaignId);
-            if (fileInfo && fs.existsSync(fileInfo.trackingPath)) {
-                try {
-                    // Keep the tracking file for reference, but log its location
-                    console.log(`Campaign tracking file saved at: ${fileInfo.trackingPath}`);
-                } catch (cleanupError) {
-                    console.error('Error handling tracking file:', cleanupError);
-                }
-            }
+            // Campaign completed - no tracking file needed
         }
     }
     
