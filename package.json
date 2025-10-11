@@ -1,0 +1,27 @@
+{
+  "name": "whatsapp-web-bulk-sender",
+  "version": "1.0.0",
+  "description": "WhatsApp Web Bulk Message Sender with QR Authentication",
+  "main": "server.js",
+  "scripts": {
+    "dev": "nodemon server.js",
+    "dev:local": "nodemon start-local.js",
+    "start": "node server.js",
+    "start:local": "node start-local.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.18.2",
+    "multer": "^1.4.5-lts.1",
+    "qrcode": "^1.5.3",
+    "socket.io": "^4.7.2",
+    "whatsapp-web.js": "^1.34.1",
+    "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

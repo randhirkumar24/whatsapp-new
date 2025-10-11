@@ -1,0 +1,1826 @@
+const express = require('express');
+const http = require('http');
+const socketIo = require('socket.io');
+const { Client, LocalAuth } = require('whatsapp-web.js');
+const QRCode = require('qrcode');
+const multer = require('multer');
+const xlsx = require('xlsx');
+const path = require('path');
+const fs = require('fs');
+const cors = require('cors');
+
+const app = express();
+const server = http.createServer(app);
+const io = socketIo(server, {
+    cors: {
+        origin: "*",
+        methods: ["GET", "POST"]
+    }
+});
+
+// Middleware
+app.use(cors());
+app.use(express.json());
+app.use(express.static('public'));
+
+// Configure multer for file uploads
+const upload = multer({
+    dest: 'uploads/',
+    fileFilter: (req, file, cb) => {
+        const allowedTypes = ['.xlsx', '.xls', '.csv', '.jpg', '.jpeg', '.png', '.gif', '.mp4', '.avi', '.mov', '.mkv', '.webm'];
+        const fileExtension = path.extname(file.originalname).toLowerCase();
+        if (allowedTypes.includes(fileExtension)) {
+            cb(null, true);
+        } else {
+            cb(new Error('Only Excel files (.xlsx, .xls, .csv) and media files (.jpg, .jpeg, .png, .gif, .mp4, .avi, .mov, .mkv, .webm) are allowed!'), false);
+        }
+    },
+    limits: {
+        fileSize: 50 * 1024 * 1024 // 50MB limit for media files
+    }
+});
+
+// WhatsApp Client Configuration
+let client = null;
+let isClientReady = false;
+let isClientAuthenticated = false;
+let qrCodeData = null;
+let isInitializing = false;
+let clientInstanceId = null;
+
+// Campaign State Management
+let activeCampaigns = new Map(); // campaignId -> campaign state
+let pausedCampaigns = new Map(); // campaignId -> paused campaign state
+
+// Campaign file tracking
+let campaignFiles = new Map(); // campaignId -> { originalPath, trackingPath }
+
+// Enhanced connection management
+let keepAliveInterval = null;
+let connectionHealthCheckInterval = null;
+let lastSuccessfulConnection = Date.now();
+let connectionFailureCount = 0;
+const MAX_CONNECTION_FAILURES = 3;
+
+function startKeepAlive() {
+    // Clear any existing keep-alive
+    if (keepAliveInterval) {
+        clearInterval(keepAliveInterval);
+    }
+    
+    // Enhanced keep-alive every 2 minutes with connection validation
+    keepAliveInterval = setInterval(async () => {
+        if (client && isClientReady && isClientAuthenticated) {
+            try {
+                // More comprehensive connection check
+                const state = await client.getState();
+                if (state === 'CONNECTED') {
+                    lastSuccessfulConnection = Date.now();
+                    connectionFailureCount = 0;
+                    console.log('Keep-alive: Connection healthy, state:', state);
+                } else {
+                    throw new Error(`Connection state is ${state}, not CONNECTED`);
+                }
+            } catch (error) {
+                connectionFailureCount++;
+                console.error(`Keep-alive failed (attempt ${connectionFailureCount}/${MAX_CONNECTION_FAILURES}):`, error.message);
+                
+                // If keep-alive fails multiple times, force reconnection
+                if (connectionFailureCount >= MAX_CONNECTION_FAILURES) {
+                    console.log('Multiple keep-alive failures detected, forcing reconnection...');
+                    await forceReconnection();
+                }
+            }
+        }
+    }, 2 * 60 * 1000); // Reduced to 2 minutes for faster detection
+}
+
+function startConnectionHealthCheck() {
+    // Clear any existing health check
+    if (connectionHealthCheckInterval) {
+        clearInterval(connectionHealthCheckInterval);
+    }
+    
+    // Check connection health every 30 seconds
+    connectionHealthCheckInterval = setInterval(async () => {
+        if (client && isClientReady && isClientAuthenticated) {
+            const timeSinceLastSuccess = Date.now() - lastSuccessfulConnection;
+            
+            // If no successful connection for more than 10 minutes, check health
+            if (timeSinceLastSuccess > 10 * 60 * 1000) {
+                try {
+                    await client.getState();
+                    lastSuccessfulConnection = Date.now();
+                    connectionFailureCount = 0;
+                } catch (error) {
+                    console.error('Connection health check failed:', error.message);
+                    await forceReconnection();
+                }
+            }
+        }
+        
+        // Check for stuck campaigns
+        checkStuckCampaigns();
+    }, 30 * 1000); // 30 seconds
+}
+
+async function forceReconnection() {
+    console.log('Forcing WhatsApp client reconnection...');
+    
+    // Stop all intervals
+    stopKeepAlive();
+    stopConnectionHealthCheck();
+    
+    // Reset states
+    isClientReady = false;
+    isClientAuthenticated = false;
+    connectionFailureCount = 0;
+    
+    // Emit status update
+    io.emit('status', { 
+        authenticated: false, 
+        ready: false, 
+        message: 'Connection lost, reconnecting...' 
+    });
+    
+    // Destroy existing client and reinitialize
+    if (client) {
+        try {
+            await client.destroy();
+        } catch (err) {
+            console.log('Error destroying client during force reconnection:', err.message);
+        }
+        client = null;
+    }
+    
+    // Reinitialize after a short delay
+    setTimeout(() => {
+        initializeWhatsAppClient();
+    }, 5000);
+}
+
+function stopKeepAlive() {
+    if (keepAliveInterval) {
+        clearInterval(keepAliveInterval);
+        keepAliveInterval = null;
+    }
+}
+
+function stopConnectionHealthCheck() {
+    if (connectionHealthCheckInterval) {
+        clearInterval(connectionHealthCheckInterval);
+        connectionHealthCheckInterval = null;
+    }
+}
+
+// Check for stuck campaigns and restart them
+function checkStuckCampaigns() {
+    const now = Date.now();
+    const stuckThreshold = 5 * 60 * 1000; // 5 minutes
+    
+    for (const [campaignId, campaignState] of activeCampaigns.entries()) {
+        if (!campaignState.isPaused) {
+            const timeSinceStart = now - campaignState.startedAt.getTime();
+            const timeSinceLastActivity = now - (campaignState.lastActivity || campaignState.startedAt.getTime());
+            
+            // If campaign has been running for more than 5 minutes without activity
+            if (timeSinceLastActivity > stuckThreshold) {
+                console.log(`Campaign ${campaignId} appears to be stuck, restarting...`);
+                
+                // Emit stuck campaign event
+                io.emit('campaign_stuck', { 
+                    campaignId: campaignId,
+                    timeSinceStart: timeSinceStart,
+                    timeSinceLastActivity: timeSinceLastActivity
+                });
+                
+                // Restart the campaign
+                setTimeout(() => {
+                    continueCampaign(campaignId);
+                }, 2000);
+            }
+        }
+    }
+}
+
+// Enhanced connection validation function
+async function validateConnection(strict = true) {
+    if (!client) {
+        throw new Error('WhatsApp client is not initialized');
+    }
+    
+    if (!isClientReady || !isClientAuthenticated) {
+        throw new Error('WhatsApp client is not ready or authenticated');
+    }
+    
+    try {
+        // Check if the browser page is still alive
+        if (!client.pupPage || client.pupPage.isClosed()) {
+            throw new Error('Browser page is closed');
+        }
+        
+        // Check client state
+        const state = await client.getState();
+        if (state !== 'CONNECTED') {
+            if (strict) {
+                throw new Error(`Client state is ${state}, not CONNECTED`);
+            } else {
+                console.warn(`Client state is ${state}, not CONNECTED, but continuing in non-strict mode`);
+            }
+        }
+        
+        // Update last successful connection
+        lastSuccessfulConnection = Date.now();
+        connectionFailureCount = 0;
+        
+        return true;
+    } catch (error) {
+        if (strict) {
+            connectionFailureCount++;
+            console.error(`Connection validation failed (attempt ${connectionFailureCount}/${MAX_CONNECTION_FAILURES}):`, error.message);
+            
+            // If validation fails multiple times, force reconnection
+            if (connectionFailureCount >= MAX_CONNECTION_FAILURES) {
+                console.log('Multiple connection validation failures detected, forcing reconnection...');
+                await forceReconnection();
+            }
+        } else {
+            console.warn(`Connection validation warning (non-strict mode):`, error.message);
+        }
+        
+        throw error;
+    }
+}
+
+// Initialize WhatsApp Client
+function initializeWhatsAppClient() {
+    try {
+        // Prevent multiple simultaneous initializations
+        if (isInitializing) {
+            console.log('Client initialization already in progress, skipping...');
+            return;
+        }
+        
+        isInitializing = true;
+        clientInstanceId = Date.now().toString();
+        
+        console.log(`Starting client initialization (Instance: ${clientInstanceId})`);
+        
+        // Ensure session directory exists
+        const sessionDir = './session';
+        if (!fs.existsSync(sessionDir)) {
+            fs.mkdirSync(sessionDir, { recursive: true });
+            console.log('Created session directory');
+        }
+        
+        // Clean up any existing client instance
+        if (client) {
+            console.log('Cleaning up existing client instance...');
+            client.destroy().catch(err => console.log('Error destroying existing client:', err.message));
+            client = null;
+        }
+        
+        client = new Client({
+            authStrategy: new LocalAuth({
+                clientId: 'whatsapp-bulk-sender',
+                dataPath: './session'
+            }),
+            puppeteer: {
+                headless: true,
+                executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || (process.platform === 'win32' ? undefined : '/usr/bin/chromium-browser'),
+                args: [
+                    '--no-sandbox',
+                    '--disable-setuid-sandbox',
+                    '--disable-dev-shm-usage',
+                    '--disable-accelerated-2d-canvas',
+                    '--no-first-run',
+                    '--no-zygote',
+                    '--disable-gpu',
+                    '--disable-web-security',
+                    '--disable-features=VizDisplayCompositor',
+                    '--disable-background-timer-throttling',
+                    '--disable-backgrounding-occluded-windows',
+                    '--disable-renderer-backgrounding',
+                    '--disable-field-trial-config',
+                    '--disable-ipc-flooding-protection',
+                    '--disable-extensions',
+                    '--disable-plugins',
+                    '--disable-default-apps',
+                    '--disable-sync',
+                    '--disable-translate',
+                    '--hide-scrollbars',
+                    '--mute-audio',
+                    '--no-default-browser-check',
+                    '--disable-component-extensions-with-background-pages',
+                    '--disable-background-networking',
+                    '--disable-sync-preferences',
+                    '--disable-client-side-phishing-detection',
+                    '--disable-component-update',
+                    '--disable-domain-reliability',
+                    '--disable-features=TranslateUI',
+                    '--disable-blink-features=AutomationControlled',
+                    '--disable-features=VizDisplayCompositor,VizServiceDisplayCompositor',
+                    '--memory-pressure-off',
+                    '--max_old_space_size=4096',
+                    '--disable-background-networking',
+                    '--disable-default-apps',
+                    '--disable-extensions',
+                    '--disable-sync',
+                    '--metrics-recording-only',
+                    '--no-first-run',
+                    '--safebrowsing-disable-auto-update',
+                    '--disable-client-side-phishing-detection',
+                    '--disable-component-update',
+                    '--disable-domain-reliability',
+                    '--disable-features=TranslateUI',
+                    '--disable-ipc-flooding-protection',
+                    '--disable-renderer-backgrounding',
+                    '--disable-backgrounding-occluded-windows',
+                    '--disable-background-timer-throttling',
+                    '--disable-features=VizDisplayCompositor',
+                    '--disable-web-security',
+                    '--disable-gpu',
+                    '--no-zygote',
+                    '--no-first-run',
+                    '--disable-accelerated-2d-canvas',
+                    '--disable-dev-shm-usage',
+                    '--disable-setuid-sandbox',
+                    '--no-sandbox'
+                ],
+                timeout: 60000,
+                protocolTimeout: 60000
+            },
+            webVersion: '2.2412.54',
+            webVersionCache: {
+                type: 'local'
+            },
+            restartOnAuthFail: true,
+            takeoverOnConflict: false,
+            takeoverTimeoutMs: 0,
+            qrMaxRetries: 3,
+            authTimeoutMs: 60000
+        });
+
+        // Event: QR Code received
+        client.on('qr', async (qr) => {
+            console.log('QR Code received');
+            
+            // Only update QR code if it's different from the current one
+            // This prevents constant QR code updates that can interfere with scanning
+            const newQrCodeData = await QRCode.toDataURL(qr);
+            
+            if (qrCodeData !== newQrCodeData) {
+                qrCodeData = newQrCodeData;
+                io.emit('qr', qrCodeData);
+                io.emit('status', { 
+                    authenticated: false, 
+                    ready: false, 
+                    message: 'Scan QR code with your WhatsApp mobile app' 
+                });
+                console.log('QR Code updated and sent to client');
+            } else {
+                console.log('QR Code unchanged, not updating client');
+            }
+        });
+
+        // Event: Client authenticated
+        client.on('authenticated', () => {
+            console.log('WhatsApp Client authenticated');
+            isClientAuthenticated = true;
+            qrCodeData = null;
+            io.emit('authenticated', true);
+            io.emit('status', { 
+                authenticated: true, 
+                ready: false, 
+                message: 'WhatsApp authenticated, initializing...' 
+            });
+        });
+
+        // Event: Authentication failed
+        client.on('auth_failure', (msg) => {
+            console.error('Authentication failed:', msg);
+            isClientAuthenticated = false;
+            isClientReady = false;
+            io.emit('auth_failure', msg);
+            io.emit('status', { 
+                authenticated: false, 
+                ready: false, 
+                message: 'Authentication failed: ' + msg 
+            });
+        });
+
+        // Event: Client ready
+        client.on('ready', () => {
+            console.log(`WhatsApp Client is ready! (Instance: ${clientInstanceId})`);
+            isClientReady = true;
+            lastSuccessfulConnection = Date.now();
+            connectionFailureCount = 0;
+            
+            io.emit('ready', true);
+            io.emit('status', { 
+                authenticated: true, 
+                ready: true, 
+                message: 'WhatsApp is ready! You can now send messages.' 
+            });
+            
+            // Start enhanced connection management
+            startKeepAlive();
+            startConnectionHealthCheck();
+        });
+
+        // Event: Loading screen
+        client.on('loading_screen', (percent, message) => {
+            console.log(`Loading: ${percent}% - ${message}`);
+            io.emit('loading_screen', { percent, message });
+            io.emit('status', { 
+                authenticated: isClientAuthenticated, 
+                ready: false, 
+                message: `Loading: ${percent}% - ${message}` 
+            });
+            
+            // If stuck at 99% for more than 30 seconds, force ready state
+            if (percent >= 99) {
+                setTimeout(() => {
+                    if (!isClientReady && isClientAuthenticated) {
+                        console.log('Loading stuck at 99%, forcing ready state...');
+                        isClientReady = true;
+                        io.emit('ready', true);
+                        io.emit('status', { 
+                            authenticated: true, 
+                            ready: true, 
+                            message: 'WhatsApp is ready! You can now send messages.' 
+                        });
+                    }
+                }, 30000); // 30 second timeout
+            }
+        });
+
+        // Event: Change state
+        client.on('change_state', (state) => {
+            console.log('Client state changed to:', state);
+            io.emit('state_change', { state });
+            
+            if (state === 'CONNECTED') {
+                console.log('Client connected to WhatsApp Web');
+                io.emit('status', { 
+                    authenticated: true, 
+                    ready: false, 
+                    message: 'Connected to WhatsApp Web, initializing...' 
+                });
+            }
+        });
+
+        // Event: Client disconnected
+        client.on('disconnected', (reason) => {
+            console.log(`WhatsApp Client disconnected: ${reason} (Instance: ${clientInstanceId})`);
+            isClientReady = false;
+            isClientAuthenticated = false;
+            qrCodeData = null;
+            isInitializing = false;
+            
+            // Stop all connection management
+            stopKeepAlive();
+            stopConnectionHealthCheck();
+            
+            io.emit('disconnected', reason);
+            io.emit('status', { 
+                authenticated: false, 
+                ready: false, 
+                message: 'WhatsApp disconnected: ' + reason 
+            });
+            
+            // Only attempt to reconnect for certain disconnect reasons
+            const shouldReconnect = reason !== 'NAVIGATION' && reason !== 'LOGOUT';
+            
+            if (shouldReconnect) {
+                console.log('Attempting to reconnect in 10 seconds...');
+                setTimeout(() => {
+                    if (!isClientAuthenticated && !isInitializing) {
+                        console.log('Reinitializing WhatsApp client...');
+                        initializeWhatsAppClient();
+                    }
+                }, 10000); // Reduced delay to 10 seconds for faster recovery
+            } else {
+                console.log(`Not reconnecting due to reason: ${reason}`);
+            }
+        });
+
+        // Initialize the client with timeout
+        console.log('Starting WhatsApp client initialization...');
+        
+        // Set a timeout for initialization
+        const initTimeout = setTimeout(() => {
+            if (!isClientAuthenticated && !isClientReady) {
+                console.log('Initialization timeout, destroying and recreating client...');
+                if (client) {
+                    client.destroy().then(() => {
+                        console.log('Client destroyed, reinitializing...');
+                        setTimeout(() => {
+                            initializeWhatsAppClient();
+                        }, 5000);
+                    }).catch(err => {
+                        console.error('Error destroying client:', err);
+                        initializeWhatsAppClient();
+                    });
+                }
+            }
+        }, 30000); // Reduced to 30 second timeout for faster recovery
+        
+        client.initialize().then(() => {
+            clearTimeout(initTimeout);
+            isInitializing = false;
+            console.log(`WhatsApp client initialization completed (Instance: ${clientInstanceId})`);
+        }).catch((error) => {
+            clearTimeout(initTimeout);
+            isInitializing = false;
+            console.error('Error during client initialization:', error);
+            io.emit('error', 'Failed to initialize WhatsApp client: ' + error.message);
+            
+            // If initialization fails, try to reinitialize after a delay
+            setTimeout(() => {
+                if (!isClientReady && !isClientAuthenticated && !isInitializing) {
+                    console.log('Retrying client initialization...');
+                    initializeWhatsAppClient();
+                }
+            }, 10000); // Retry after 10 seconds
+        });
+
+    } catch (error) {
+        console.error('Error initializing WhatsApp client:', error);
+        io.emit('error', 'Failed to initialize WhatsApp client');
+    }
+}
+
+// API Routes
+
+// Health check endpoint
+app.get('/health', (req, res) => {
+    res.json({ 
+        status: 'OK', 
+        timestamp: new Date().toISOString(),
+        whatsapp: {
+            authenticated: isClientAuthenticated,
+            ready: isClientReady,
+            hasQR: qrCodeData !== null,
+            sessionExists: fs.existsSync('./session/whatsapp-bulk-sender')
+        }
+    });
+});
+
+// Get current status
+app.get('/api/status', (req, res) => {
+    res.json({
+        authenticated: isClientAuthenticated,
+        ready: isClientReady,
+        hasQR: qrCodeData !== null,
+        message: getStatusMessage()
+    });
+});
+
+// Get QR code
+app.get('/api/qr', (req, res) => {
+    if (qrCodeData) {
+        res.json({ qr: qrCodeData });
+    } else {
+        res.status(404).json({ error: 'No QR code available' });
+    }
+});
+
+// Logout endpoint
+app.post('/api/logout', async (req, res) => {
+    try {
+        if (client) {
+            console.log('Logging out WhatsApp client...');
+            await client.logout();
+            
+            // Reset all states
+            isClientReady = false;
+            isClientAuthenticated = false;
+            qrCodeData = null;
+            
+            // Destroy the client instance
+            await client.destroy();
+            client = null;
+            
+            // Emit logout event
+            io.emit('logged_out', true);
+            io.emit('status', { 
+                authenticated: false, 
+                ready: false, 
+                message: 'Successfully logged out from WhatsApp' 
+            });
+            
+            // Reinitialize client for new login
+            setTimeout(() => {
+                initializeWhatsAppClient();
+            }, 2000);
+            
+            res.json({ success: true, message: 'Successfully logged out' });
+        } else {
+            res.status(400).json({ error: 'No active WhatsApp session to logout' });
+        }
+    } catch (error) {
+        console.error('Error during logout:', error);
+        res.status(500).json({ error: 'Failed to logout: ' + error.message });
+    }
+});
+
+// Force ready endpoint - for troubleshooting stuck authenticated state
+app.post('/api/force-ready', async (req, res) => {
+    try {
+        if (!isClientAuthenticated) {
+            return res.status(400).json({ error: 'Client is not authenticated' });
+        }
+        
+        if (isClientReady) {
+            return res.json({ success: true, message: 'Client is already ready' });
+        }
+        
+        console.log('Forcing client to ready state...');
+        
+        // Try to validate client state first
+        try {
+            if (client) {
+                await client.getState();
+                console.log('Client state validated successfully');
+            }
+        } catch (stateError) {
+            console.error('Client state validation failed:', stateError.message);
+            return res.status(400).json({ error: 'Client is not properly connected to WhatsApp Web. Please try clearing session and reconnecting.' });
+        }
+        
+        // Emit ready event manually
+        isClientReady = true;
+        io.emit('ready', true);
+        io.emit('status', { 
+            authenticated: true, 
+            ready: true, 
+            message: 'WhatsApp is ready! You can now send messages.' 
+        });
+        
+        res.json({ success: true, message: 'Client forced to ready state' });
+    } catch (error) {
+        console.error('Error forcing ready state:', error);
+        res.status(500).json({ error: 'Failed to force ready state: ' + error.message });
+    }
+});
+
+// Enhanced connection health check endpoint
+app.post('/api/check-connection', async (req, res) => {
+    try {
+        if (!client) {
+            return res.status(400).json({ 
+                success: false, 
+                error: 'Client not initialized',
+                recommendation: 'Clear session and reconnect'
+            });
+        }
+        
+        if (!isClientAuthenticated) {
+            return res.status(400).json({ 
+                success: false, 
+                error: 'Client not authenticated',
+                recommendation: 'Scan QR code to authenticate'
+            });
+        }
+        
+        // Enhanced connection validation
+        try {
+            await validateConnection();
+            const state = await client.getState();
+            console.log('Enhanced connection check successful:', state);
+            
+            return res.json({ 
+                success: true, 
+                message: 'Client connection is healthy',
+                state: state,
+                authenticated: isClientAuthenticated,
+                ready: isClientReady,
+                lastSuccessfulConnection: new Date(lastSuccessfulConnection).toISOString(),
+                connectionFailureCount: connectionFailureCount
+            });
+        } catch (validationError) {
+            console.error('Enhanced connection check failed:', validationError.message);
+            return res.status(400).json({ 
+                success: false, 
+                error: 'Client connection failed: ' + validationError.message,
+                recommendation: 'Connection will be automatically restored. If issues persist, clear session and reconnect.',
+                connectionFailureCount: connectionFailureCount
+            });
+        }
+    } catch (error) {
+        console.error('Error checking connection:', error);
+        res.status(500).json({ error: 'Failed to check connection: ' + error.message });
+    }
+});
+
+// Clear session endpoint - for troubleshooting stuck connections
+app.post('/api/clear-session', async (req, res) => {
+    try {
+        console.log('Clearing WhatsApp session data...');
+        
+        // Destroy existing client
+        if (client) {
+            try {
+                await client.destroy();
+            } catch (err) {
+                console.log('Error destroying client during session clear:', err.message);
+            }
+            client = null;
+        }
+        
+        // Reset all states
+        isClientReady = false;
+        isClientAuthenticated = false;
+        qrCodeData = null;
+        
+        // Clear session directory
+        const sessionDir = './session';
+        if (fs.existsSync(sessionDir)) {
+            try {
+                fs.rmSync(sessionDir, { recursive: true, force: true });
+                console.log('Session directory cleared');
+            } catch (err) {
+                console.log('Error clearing session directory:', err.message);
+            }
+        }
+        
+        // Emit status update
+        io.emit('status', { 
+            authenticated: false, 
+            ready: false, 
+            message: 'Session cleared, reinitializing...' 
+        });
+        
+        // Reinitialize client
+        setTimeout(() => {
+            initializeWhatsAppClient();
+        }, 3000);
+        
+        res.json({ success: true, message: 'Session cleared successfully' });
+    } catch (error) {
+        console.error('Error clearing session:', error);
+        res.status(500).json({ error: 'Failed to clear session: ' + error.message });
+    }
+});
+
+// Pause campaign endpoint
+app.post('/api/campaign/pause', async (req, res) => {
+    try {
+        const { campaignId } = req.body;
+        
+        if (!campaignId) {
+            return res.status(400).json({ error: 'Campaign ID is required' });
+        }
+        
+        const campaignState = activeCampaigns.get(campaignId);
+        if (!campaignState) {
+            return res.status(404).json({ error: 'Campaign not found or not active' });
+        }
+        
+        // Pause the campaign
+        campaignState.isPaused = true;
+        campaignState.pausedAt = new Date();
+        
+        // Calculate the next message that would be sent
+        const nextMessageIndex = campaignState.sentCount + campaignState.failedCount;
+        
+        // Move to paused campaigns
+        pausedCampaigns.set(campaignId, campaignState);
+        activeCampaigns.delete(campaignId);
+        
+        console.log(`Campaign ${campaignId} paused at message ${nextMessageIndex + 1} (sent: ${campaignState.sentCount}, failed: ${campaignState.failedCount})`);
+        
+        res.json({ 
+            success: true, 
+            message: 'Campaign paused successfully',
+            campaignState: {
+                currentIndex: campaignState.currentIndex,
+                totalMessages: campaignState.phoneNumbers.length,
+                sentCount: campaignState.sentCount,
+                failedCount: campaignState.failedCount
+            }
+        });
+        
+    } catch (error) {
+        console.error('Error pausing campaign:', error);
+        res.status(500).json({ error: 'Failed to pause campaign: ' + error.message });
+    }
+});
+
+// Resume campaign endpoint
+app.post('/api/campaign/resume', async (req, res) => {
+    try {
+        const { campaignId } = req.body;
+        
+        if (!campaignId) {
+            return res.status(400).json({ error: 'Campaign ID is required' });
+        }
+        
+        const campaignState = pausedCampaigns.get(campaignId);
+        if (!campaignState) {
+            return res.status(404).json({ error: 'Campaign not found or not paused' });
+        }
+        
+        // Resume the campaign
+        campaignState.isPaused = false;
+        campaignState.resumedAt = new Date();
+        campaignState.lastActivity = new Date();
+        
+        // Move back to active campaigns
+        activeCampaigns.set(campaignId, campaignState);
+        pausedCampaigns.delete(campaignId);
+        
+        // Calculate the next message index to send
+        const nextMessageIndex = campaignState.sentCount + campaignState.failedCount;
+        console.log(`Campaign ${campaignId} resumed from message ${nextMessageIndex + 1} (sent: ${campaignState.sentCount}, failed: ${campaignState.failedCount})`);
+        
+        // Verify tracking file state before resuming
+        const pendingNumbers = getPendingPhoneNumbers(campaignId);
+        console.log(`Tracking file shows ${pendingNumbers.length} pending numbers for campaign ${campaignId}`);
+        
+        // Start sending messages from where it left off
+        continueCampaign(campaignId);
+        
+        res.json({ 
+            success: true, 
+            message: 'Campaign resumed successfully',
+            campaignState: {
+                currentIndex: campaignState.currentIndex,
+                totalMessages: campaignState.phoneNumbers.length,
+                sentCount: campaignState.sentCount,
+                failedCount: campaignState.failedCount,
+                pendingNumbers: pendingNumbers.length
+            }
+        });
+        
+    } catch (error) {
+        console.error('Error resuming campaign:', error);
+        res.status(500).json({ error: 'Failed to resume campaign: ' + error.message });
+    }
+});
+
+// Restart stuck campaign endpoint
+app.post('/api/campaign/restart', async (req, res) => {
+    try {
+        const { campaignId } = req.body;
+        
+        if (!campaignId) {
+            return res.status(400).json({ error: 'Campaign ID is required' });
+        }
+        
+        const campaignState = activeCampaigns.get(campaignId);
+        if (!campaignState) {
+            return res.status(404).json({ error: 'Campaign not found or not active' });
+        }
+        
+        console.log(`Manually restarting campaign ${campaignId}...`);
+        
+        // Update last activity
+        campaignState.lastActivity = new Date();
+        
+        // Restart the campaign
+        continueCampaign(campaignId);
+        
+        res.json({ 
+            success: true, 
+            message: 'Campaign restarted successfully',
+            campaignState: {
+                currentIndex: campaignState.currentIndex,
+                totalMessages: campaignState.phoneNumbers.length,
+                sentCount: campaignState.sentCount,
+                failedCount: campaignState.failedCount
+            }
+        });
+        
+    } catch (error) {
+        console.error('Error restarting campaign:', error);
+        res.status(500).json({ error: 'Failed to restart campaign: ' + error.message });
+    }
+});
+
+// Get campaign status endpoint
+app.get('/api/campaign/:campaignId/status', async (req, res) => {
+    try {
+        const { campaignId } = req.params;
+        
+        let campaignState = activeCampaigns.get(campaignId);
+        let status = 'active';
+        
+        if (!campaignState) {
+            campaignState = pausedCampaigns.get(campaignId);
+            status = 'paused';
+        }
+        
+        if (!campaignState) {
+            return res.status(404).json({ error: 'Campaign not found' });
+        }
+        
+        res.json({
+            success: true,
+            status: status,
+            campaignState: {
+                currentIndex: campaignState.currentIndex,
+                totalMessages: campaignState.phoneNumbers.length,
+                sentCount: campaignState.sentCount,
+                failedCount: campaignState.failedCount,
+                progress: Math.round(((campaignState.sentCount + campaignState.failedCount) / campaignState.phoneNumbers.length) * 100)
+            }
+        });
+        
+    } catch (error) {
+        console.error('Error getting campaign status:', error);
+        res.status(500).json({ error: 'Failed to get campaign status: ' + error.message });
+    }
+});
+
+// Upload and send messages
+app.post('/api/upload-and-send', upload.fields([
+    { name: 'mediaFile', maxCount: 1 },
+    { name: 'excelFile', maxCount: 1 }
+]), async (req, res) => {
+    try {
+        if (!isClientReady && !isClientAuthenticated) {
+            return res.status(400).json({ error: 'WhatsApp client is not ready. Please authenticate first.' });
+        }
+        
+        if (!client) {
+            return res.status(400).json({ error: 'WhatsApp client is not initialized. Please try again.' });
+        }
+
+        const message = req.body.message || 'Hello! This is a message from WhatsApp Bulk Sender.';
+        const fileType = req.body.fileType || 'excel'; // 'excel' or 'media'
+        const campaignId = req.body.campaignId || null;
+        
+        let phoneNumbers = [];
+        let mediaFile = null;
+
+        if (fileType === 'excel') {
+            // For text messages, we need Excel file
+            if (!req.files.excelFile) {
+                return res.status(400).json({ error: 'Excel file is required for text messages' });
+            }
+            
+            // Read the uploaded Excel file
+            const workbook = xlsx.readFile(req.files.excelFile[0].path);
+            const sheetName = workbook.SheetNames[0];
+            const worksheet = workbook.Sheets[sheetName];
+            const data = xlsx.utils.sheet_to_json(worksheet, { header: 1 });
+
+            // Extract phone numbers (assuming they are in the first column)
+            for (let i = 0; i < data.length; i++) {
+                if (data[i][0]) {
+                    const phoneNumber = data[i][0].toString().trim();
+                    const formattedNumber = validateAndFormatPhoneNumber(phoneNumber, i);
+                    
+                    if (formattedNumber) {
+                        phoneNumbers.push(formattedNumber);
+                    }
+                }
+            }
+
+            if (phoneNumbers.length === 0) {
+                fs.unlinkSync(req.files.excelFile[0].path);
+                return res.status(400).json({ error: 'No valid phone numbers found in the Excel file' });
+            }
+
+        } else if (fileType === 'media') {
+            // For media messages, we need both media file and Excel file
+            if (!req.files.mediaFile) {
+                return res.status(400).json({ error: 'Media file is required for media messages' });
+            }
+            
+            if (!req.files.excelFile) {
+                fs.unlinkSync(req.files.mediaFile[0].path);
+                return res.status(400).json({ error: 'Excel file is required for media messages' });
+            }
+
+            // Read the uploaded Excel file
+            const workbook = xlsx.readFile(req.files.excelFile[0].path);
+            const sheetName = workbook.SheetNames[0];
+            const worksheet = workbook.Sheets[sheetName];
+            const data = xlsx.utils.sheet_to_json(worksheet, { header: 1 });
+
+            // Extract phone numbers (assuming they are in the first column)
+            for (let i = 0; i < data.length; i++) {
+                if (data[i][0]) {
+                    const phoneNumber = data[i][0].toString().trim();
+                    const formattedNumber = validateAndFormatPhoneNumber(phoneNumber, i);
+                    
+                    if (formattedNumber) {
+                        phoneNumbers.push(formattedNumber);
+                    }
+                }
+            }
+
+            if (phoneNumbers.length === 0) {
+                fs.unlinkSync(req.files.excelFile[0].path);
+                fs.unlinkSync(req.files.mediaFile[0].path);
+                return res.status(400).json({ error: 'No valid phone numbers found in the Excel file' });
+            }
+            
+            // Create MessageMedia from uploaded file with proper filename handling
+            try {
+                const { MessageMedia } = require('whatsapp-web.js');
+                const originalFilename = req.files.mediaFile[0].originalname;
+                const fileExtension = originalFilename.split('.').pop().toLowerCase();
+                
+                // Determine MIME type based on file extension
+                let mimeType;
+                switch (fileExtension) {
+                    case 'jpg':
+                    case 'jpeg':
+                        mimeType = 'image/jpeg';
+                        break;
+                    case 'png':
+                        mimeType = 'image/png';
+                        break;
+                    case 'gif':
+                        mimeType = 'image/gif';
+                        break;
+                    case 'mp4':
+                        mimeType = 'video/mp4';
+                        break;
+                    case 'avi':
+                        mimeType = 'video/x-msvideo';
+                        break;
+                    case 'mov':
+                        mimeType = 'video/quicktime';
+                        break;
+                    case 'mkv':
+                        mimeType = 'video/x-matroska';
+                        break;
+                    case 'webm':
+                        mimeType = 'video/webm';
+                        break;
+                    default:
+                        mimeType = 'application/octet-stream';
+                }
+                
+                // Create MessageMedia with proper filename and MIME type
+                mediaFile = await MessageMedia.fromFilePath(req.files.mediaFile[0].path);
+                
+                // Ensure the media file has the correct properties
+                if (!mediaFile) {
+                    throw new Error('Failed to create MessageMedia object');
+                }
+                
+                // Set proper filename and MIME type
+                mediaFile.filename = originalFilename;
+                mediaFile.mimetype = mimeType;
+                
+                // Validate the media file data
+                if (!mediaFile.data) {
+                    throw new Error('Media file data is missing or corrupted');
+                }
+                
+                console.log(`Processed media file: ${originalFilename} (${mimeType})`);
+            } catch (mediaError) {
+                fs.unlinkSync(req.files.excelFile[0].path);
+                fs.unlinkSync(req.files.mediaFile[0].path);
+                return res.status(400).json({ error: 'Failed to process media file: ' + mediaError.message });
+            }
+        }
+
+        // Clean up uploaded files after processing
+        // Note: We need to keep the media file until all messages are sent
+        if (req.files.excelFile) {
+            fs.unlinkSync(req.files.excelFile[0].path);
+        }
+        // Don't delete media file yet - we need it for sending messages
+
+        // Store campaign state for pause/resume functionality
+        if (campaignId) {
+            // Create tracking file for this campaign
+            const excelFilePath = req.files.excelFile[0].path;
+            createTrackingFile(campaignId, phoneNumbers, excelFilePath);
+            
+            const campaignState = {
+                campaignId: campaignId,
+                phoneNumbers: phoneNumbers,
+                message: message,
+                mediaFile: mediaFile,
+                fileType: fileType,
+                currentIndex: 0,
+                sentCount: 0,
+                failedCount: 0,
+                isPaused: false,
+                createdAt: new Date(),
+                startedAt: new Date(),
+                lastActivity: new Date()
+            };
+            activeCampaigns.set(campaignId, campaignState);
+        }
+
+        // Send messages with human-like behavior
+        const results = [];
+        let successCount = 0;
+        let failureCount = 0;
+
+        console.log(`Starting to send messages to ${phoneNumbers.length} phone numbers`);
+        io.emit('bulk_send_start', { total: phoneNumbers.length, campaignId: campaignId });
+
+        // Start the campaign sending process
+        if (campaignId) {
+            // Add a small delay to make it easier to test pause functionality
+            setTimeout(async () => {
+                try {
+                    console.log(`Starting campaign ${campaignId}...`);
+                    await continueCampaign(campaignId);
+                } catch (error) {
+                    console.error(`Error starting campaign ${campaignId}:`, error);
+                    // Emit error event to frontend
+                    io.emit('campaign_error', { 
+                        campaignId: campaignId, 
+                        error: error.message 
+                    });
+                }
+            }, 2000); // 2 second delay
+        } else {
+            // For non-campaign messages, send immediately
+            await sendMessagesSequentially(phoneNumbers, message, mediaFile, campaignId);
+        }
+
+        // Only emit completion for non-campaign messages (campaign messages will emit completion in sendMessagesSequentially)
+        if (!campaignId) {
+            io.emit('bulk_send_complete', { 
+                total: phoneNumbers.length, 
+                success: successCount, 
+                failed: failureCount,
+                campaignId: campaignId
+            });
+        }
+
+        // Clean up media file after all messages are sent
+        if (req.files && req.files.mediaFile && fs.existsSync(req.files.mediaFile[0].path)) {
+            try {
+                fs.unlinkSync(req.files.mediaFile[0].path);
+                console.log('Media file cleaned up successfully');
+            } catch (cleanupError) {
+                console.error('Error cleaning up media file:', cleanupError);
+            }
+        }
+
+        res.json({
+            success: true,
+            total: phoneNumbers.length,
+            successful: successCount,
+            failed: failureCount,
+            results: results
+        });
+
+    } catch (error) {
+        console.error('Error processing file and sending messages:', error);
+        
+        // Clean up uploaded files if they exist
+        if (req.files) {
+            if (req.files.excelFile && fs.existsSync(req.files.excelFile[0].path)) {
+                fs.unlinkSync(req.files.excelFile[0].path);
+            }
+            if (req.files.mediaFile && fs.existsSync(req.files.mediaFile[0].path)) {
+                fs.unlinkSync(req.files.mediaFile[0].path);
+            }
+        }
+        
+        res.status(500).json({ error: 'Failed to process file and send messages: ' + error.message });
+    }
+});
+
+// Helper function to get status message
+function getStatusMessage() {
+    if (isClientReady) {
+        return 'WhatsApp is ready! You can now send messages.';
+    } else if (isClientAuthenticated) {
+        return 'WhatsApp authenticated, initializing...';
+    } else if (qrCodeData) {
+        return 'Scan QR code with your WhatsApp mobile app';
+    } else {
+        return 'Initializing WhatsApp client...';
+    }
+}
+
+// Helper function to generate random delay between min and max milliseconds
+function getRandomDelay(min, max) {
+    return Math.floor(Math.random() * (max - min + 1)) + min;
+}
+
+// Helper function to calculate realistic typing duration based on message length
+function calculateTypingDuration(message) {
+    // Base typing speed: ~40-60 characters per minute (human average)
+    const baseSpeed = getRandomDelay(40, 60); // chars per minute
+    const charsPerSecond = baseSpeed / 60;
+    
+    // Calculate base duration
+    const baseDuration = (message.length / charsPerSecond) * 1000;
+    
+    // Add some randomness and thinking pauses
+    const thinkingPauses = Math.floor(message.length / 50) * getRandomDelay(500, 1500); // Pause every ~50 chars
+    const randomVariation = baseDuration * (getRandomDelay(80, 120) / 100); // ±20% variation
+    
+    // Minimum 3 seconds, maximum 30 seconds for very long messages
+    const finalDuration = Math.max(3000, Math.min(30000, randomVariation + thinkingPauses));
+    
+    return Math.floor(finalDuration);
+}
+
+// Helper function to simulate human reading time
+function calculateReadingTime(message) {
+    // Average reading speed: 200-250 words per minute
+    const wordsPerMinute = getRandomDelay(200, 250);
+    const words = message.split(' ').length;
+    const readingTimeMs = (words / wordsPerMinute) * 60 * 1000;
+    
+    // Minimum 1 second, maximum 10 seconds
+    return Math.max(1000, Math.min(10000, readingTimeMs));
+}
+
+// Helper function to add human-like variations to behavior
+
+// Campaign file management functions
+function createTrackingFile(campaignId, phoneNumbers, originalFilePath) {
+    try {
+        // Create a copy of the original file for tracking
+        const trackingPath = originalFilePath.replace('.xlsx', '_tracking.xlsx');
+        const trackingPath2 = originalFilePath.replace('.xls', '_tracking.xlsx');
+        const trackingPath3 = originalFilePath.replace('.csv', '_tracking.xlsx');
+        
+        let finalTrackingPath = trackingPath;
+        if (fs.existsSync(trackingPath2)) finalTrackingPath = trackingPath2;
+        if (fs.existsSync(trackingPath3)) finalTrackingPath = trackingPath3;
+        
+        // Create workbook with tracking data
+        const workbook = xlsx.utils.book_new();
+        const trackingData = phoneNumbers.map((phone, index) => ({
+            'Phone Number': phone.replace('@c.us', ''),
+            'Status': 'Pending',
+            'Sent At': '',
+            'Error': ''
+        }));
+        
+        const worksheet = xlsx.utils.json_to_sheet(trackingData);
+        xlsx.utils.book_append_sheet(workbook, worksheet, 'Tracking');
+        xlsx.writeFile(workbook, finalTrackingPath);
+        
+        // Store file paths
+        campaignFiles.set(campaignId, {
+            originalPath: originalFilePath,
+            trackingPath: finalTrackingPath
+        });
+        
+        console.log(`Created tracking file for campaign ${campaignId}: ${finalTrackingPath}`);
+        return finalTrackingPath;
+    } catch (error) {
+        console.error('Error creating tracking file:', error);
+        return null;
+    }
+}
+
+function updateTrackingFile(campaignId, phoneNumber, status, error = '') {
+    try {
+        const fileInfo = campaignFiles.get(campaignId);
+        if (!fileInfo || !fs.existsSync(fileInfo.trackingPath)) {
+            return false;
+        }
+        
+        // Read existing tracking file
+        const workbook = xlsx.readFile(fileInfo.trackingPath);
+        const worksheet = workbook.Sheets[workbook.SheetNames[0]];
+        const data = xlsx.utils.sheet_to_json(worksheet);
+        
+        // Update the specific phone number
+        const phoneWithoutSuffix = phoneNumber.replace('@c.us', '');
+        const rowIndex = data.findIndex(row => row['Phone Number'] === phoneWithoutSuffix);
+        
+        if (rowIndex !== -1) {
+            data[rowIndex]['Status'] = status;
+            data[rowIndex]['Sent At'] = status === 'Sent' ? new Date().toISOString() : '';
+            data[rowIndex]['Error'] = error;
+            
+            // Write back to file
+            const newWorksheet = xlsx.utils.json_to_sheet(data);
+            workbook.Sheets[workbook.SheetNames[0]] = newWorksheet;
+            xlsx.writeFile(workbook, fileInfo.trackingPath);
+            
+            console.log(`Updated tracking file: ${phoneWithoutSuffix} -> ${status}`);
+            return true;
+        }
+        
+        return false;
+    } catch (error) {
+        console.error('Error updating tracking file:', error);
+        return false;
+    }
+}
+
+function getPendingPhoneNumbers(campaignId) {
+    try {
+        const fileInfo = campaignFiles.get(campaignId);
+        if (!fileInfo || !fs.existsSync(fileInfo.trackingPath)) {
+            console.log(`No tracking file found for campaign ${campaignId}`);
+            return [];
+        }
+        
+        // Read tracking file
+        const workbook = xlsx.readFile(fileInfo.trackingPath);
+        const worksheet = workbook.Sheets[workbook.SheetNames[0]];
+        const data = xlsx.utils.sheet_to_json(worksheet);
+        
+        // Get only pending numbers
+        const pendingNumbers = data
+            .filter(row => row['Status'] === 'Pending')
+            .map(row => row['Phone Number'] + '@c.us');
+        
+        // Log detailed status for debugging
+        const sentCount = data.filter(row => row['Status'] === 'Sent').length;
+        const failedCount = data.filter(row => row['Status'] === 'Failed').length;
+        console.log(`Campaign ${campaignId} tracking: ${pendingNumbers.length} pending, ${sentCount} sent, ${failedCount} failed`);
+        
+        return pendingNumbers;
+    } catch (error) {
+        console.error('Error reading tracking file:', error);
+        return [];
+    }
+}
+
+// Campaign management functions
+async function continueCampaign(campaignId) {
+    const campaignState = activeCampaigns.get(campaignId);
+    if (!campaignState || campaignState.isPaused) {
+        console.log(`Campaign ${campaignId} not found or paused, skipping...`);
+        return;
+    }
+    
+    // Check if client is ready before starting campaign
+    if (!isClientReady || !isClientAuthenticated) {
+        console.log(`Client not ready for campaign ${campaignId}, waiting...`);
+        // Wait a bit and try again
+        setTimeout(() => {
+            continueCampaign(campaignId);
+        }, 5000);
+        return;
+    }
+    
+    // Get pending phone numbers from tracking file
+    const pendingPhoneNumbers = getPendingPhoneNumbers(campaignId);
+    
+    if (pendingPhoneNumbers.length === 0) {
+        console.log(`No pending numbers found for campaign ${campaignId}`);
+        return;
+    }
+    
+    console.log(`Continuing campaign ${campaignId} with ${pendingPhoneNumbers.length} pending numbers`);
+    
+    // Emit bulk_send_start event for frontend
+    io.emit('bulk_send_start', { 
+        total: campaignState.phoneNumbers.length, 
+        campaignId: campaignId,
+        pending: pendingPhoneNumbers.length,
+        sent: campaignState.sentCount,
+        failed: campaignState.failedCount
+    });
+    
+    // Verify campaign state consistency
+    const totalNumbers = campaignState.phoneNumbers.length;
+    const expectedPending = totalNumbers - campaignState.sentCount - campaignState.failedCount;
+    
+    if (pendingPhoneNumbers.length !== expectedPending) {
+        console.warn(`Tracking file inconsistency detected! Expected ${expectedPending} pending, found ${pendingPhoneNumbers.length}`);
+        console.warn(`Campaign state: sent=${campaignState.sentCount}, failed=${campaignState.failedCount}, total=${totalNumbers}`);
+    }
+    
+    // Start sending messages to pending numbers only
+    await sendMessagesSequentially(
+        pendingPhoneNumbers,
+        campaignState.message,
+        campaignState.mediaFile,
+        campaignId,
+        0 // Start from 0 since we're only processing pending numbers
+    );
+}
+
+async function sendMessagesSequentially(phoneNumbers, message, mediaFile, campaignId = null, startIndex = 0) {
+    const results = [];
+    let successCount = 0;
+    let failureCount = 0;
+    
+    for (let i = 0; i < phoneNumbers.length; i++) {
+        const phoneNumber = phoneNumbers[i];
+        const currentIndex = startIndex + i;
+        
+        // Check if campaign is paused
+        if (campaignId) {
+            const campaignState = activeCampaigns.get(campaignId);
+            if (!campaignState || campaignState.isPaused) {
+                console.log(`Campaign ${campaignId} is paused, stopping at message ${currentIndex + 1}`);
+                return;
+            }
+            
+            // Update current index in campaign state
+            campaignState.currentIndex = currentIndex;
+            
+            // Double-check if this number was already sent (extra safety check)
+            const phoneWithoutSuffix = phoneNumber.replace('@c.us', '');
+            const fileInfo = campaignFiles.get(campaignId);
+            if (fileInfo && fs.existsSync(fileInfo.trackingPath)) {
+                try {
+                    const workbook = xlsx.readFile(fileInfo.trackingPath);
+                    const worksheet = workbook.Sheets[workbook.SheetNames[0]];
+                    const data = xlsx.utils.sheet_to_json(worksheet);
+                    const row = data.find(row => row['Phone Number'] === phoneWithoutSuffix);
+                    
+                    if (row && row['Status'] === 'Sent') {
+                        console.log(`Skipping ${phoneNumber} - already sent according to tracking file`);
+                        continue; // Skip this number as it's already sent
+                    }
+                } catch (error) {
+                    console.log(`Could not verify tracking file for ${phoneNumber}, proceeding anyway`);
+                }
+            }
+        }
+        
+        try {
+            // Enhanced connection validation before proceeding
+            await validateConnection();
+
+            // Human behavior: Random delay before starting interaction (5-15 seconds)
+            // Only add pre-delay if this is not the first message of the campaign OR if we're resuming
+            if (i > 0 || startIndex > 0) {
+                const preDelay = getRandomDelay(5000, 15000);
+                console.log(`Waiting ${preDelay/1000}s before processing next number...`);
+                
+                io.emit('human_behavior', {
+                    number: phoneNumber,
+                    action: 'waiting',
+                    duration: preDelay,
+                    progress: currentIndex + 1,
+                    total: phoneNumbers.length + startIndex,
+                    campaignId: campaignId
+                });
+                
+                await new Promise(resolve => setTimeout(resolve, preDelay));
+            }
+
+            // Check if number is registered on WhatsApp
+            console.log(`Checking if ${phoneNumber} is registered...`);
+            io.emit('human_behavior', {
+                number: phoneNumber,
+                action: 'checking_registration',
+                progress: currentIndex + 1,
+                total: phoneNumbers.length + startIndex,
+                campaignId: campaignId
+            });
+
+            let isRegistered;
+            try {
+                isRegistered = await client.isRegisteredUser(phoneNumber);
+            } catch (registrationError) {
+                console.error(`Error checking registration for ${phoneNumber}:`, registrationError.message);
+                throw new Error('Failed to check if number is registered on WhatsApp');
+            }
+            
+            if (isRegistered) {
+                // Human behavior: Show as online/available
+                console.log(`Setting presence as available...`);
+                try {
+                    await client.sendPresenceAvailable();
+                } catch (err) {
+                    console.log('Could not set presence (non-critical):', err.message);
+                }
+                
+                io.emit('human_behavior', {
+                    number: phoneNumber,
+                    action: 'online',
+                    progress: currentIndex + 1,
+                    total: phoneNumbers.length + startIndex,
+                    campaignId: campaignId
+                });
+
+                // Human behavior: Random thinking time (2-8 seconds)
+                const thinkingTime = getRandomDelay(2000, 8000);
+                console.log(`Thinking for ${thinkingTime/1000}s before typing...`);
+                
+                io.emit('human_behavior', {
+                    number: phoneNumber,
+                    action: 'thinking',
+                    duration: thinkingTime,
+                    progress: currentIndex + 1,
+                    total: phoneNumbers.length + startIndex,
+                    campaignId: campaignId
+                });
+                
+                await new Promise(resolve => setTimeout(resolve, thinkingTime));
+
+                // Human behavior: Show typing indicator
+                console.log(`Showing typing indicator for ${phoneNumber}...`);
+                io.emit('human_behavior', {
+                    number: phoneNumber,
+                    action: 'typing',
+                    progress: currentIndex + 1,
+                    total: phoneNumbers.length + startIndex,
+                    campaignId: campaignId
+                });
+
+                try {
+                    // Try to get chat and send typing indicator
+                    let chat = null;
+                    try {
+                        chat = await client.getChatById(phoneNumber);
+                    await chat.sendStateTyping();
+                    } catch (chatError) {
+                        console.log(`Could not get chat or send typing indicator for ${phoneNumber}, proceeding without typing indicator`);
+                    }
+                    
+                    // Calculate typing duration based on message length (human-like)
+                    const typingDuration = calculateTypingDuration(message);
+                    console.log(`Typing for ${typingDuration/1000}s (message length: ${message.length} chars)...`);
+                    
+                    await new Promise(resolve => setTimeout(resolve, typingDuration));
+                    
+                    // Stop typing and send message
+                    console.log(`Sending message to ${phoneNumber}...`);
+                    
+                    let messageSent = false;
+                    let sendAttempts = 0;
+                    const maxAttempts = 3;
+                    
+                    while (!messageSent && sendAttempts < maxAttempts) {
+                        try {
+                            sendAttempts++;
+                            console.log(`Send attempt ${sendAttempts}/${maxAttempts} for ${phoneNumber}`);
+                    
+                    if (mediaFile) {
+                        // Send media message with caption
+                        console.log(`Sending media file: ${mediaFile.filename} to ${phoneNumber}`);
+                        await client.sendMessage(phoneNumber, mediaFile, { caption: message });
+                    } else {
+                        // Send text message
+                        await client.sendMessage(phoneNumber, message);
+                    }
+                    
+                            messageSent = true;
+                            console.log(`Message sent successfully to ${phoneNumber}`);
+                            
+                        } catch (sendError) {
+                            console.error(`Send attempt ${sendAttempts} failed for ${phoneNumber}:`, sendError.message);
+                            
+                            if (sendAttempts < maxAttempts) {
+                                // Wait before retry
+                                const retryDelay = getRandomDelay(2000, 5000);
+                                console.log(`Retrying in ${retryDelay/1000}s...`);
+                                await new Promise(resolve => setTimeout(resolve, retryDelay));
+                                
+                                // Re-validate connection before retry
+                                try {
+                                    await validateConnection();
+                                } catch (stateError) {
+                                    console.error('Connection validation failed during retry:', stateError.message);
+                                    throw new Error('WhatsApp client connection lost during retry');
+                                }
+                    } else {
+                                throw sendError;
+                            }
+                        }
+                    }
+                    
+                    results.push({ number: phoneNumber, status: 'sent', error: null });
+                    successCount++;
+                    
+                    // Update campaign state
+                    if (campaignId) {
+                        const campaignState = activeCampaigns.get(campaignId);
+                        if (campaignState) {
+                            campaignState.sentCount++;
+                            campaignState.lastActivity = new Date();
+                        }
+                        // Update tracking file
+                        updateTrackingFile(campaignId, phoneNumber, 'Sent');
+                    }
+                    
+                    io.emit('message_sent', { 
+                        number: phoneNumber, 
+                        status: 'sent', 
+                        progress: currentIndex + 1, 
+                        total: phoneNumbers.length + startIndex,
+                        humanBehavior: true,
+                        campaignId: campaignId
+                    });
+
+                    // Human behavior: Brief pause after sending (1-3 seconds)
+                    const postSendDelay = getRandomDelay(1000, 3000);
+                    await new Promise(resolve => setTimeout(resolve, postSendDelay));
+
+                } catch (messageError) {
+                    console.error(`Failed to send message to ${phoneNumber} after ${maxAttempts} attempts:`, messageError.message);
+                    throw messageError;
+                }
+
+            } else {
+                results.push({ number: phoneNumber, status: 'not_registered', error: 'Number not registered on WhatsApp' });
+                failureCount++;
+                
+                // Update campaign state
+                if (campaignId) {
+                    const campaignState = activeCampaigns.get(campaignId);
+                    if (campaignState) {
+                        campaignState.failedCount++;
+                        campaignState.lastActivity = new Date();
+                    }
+                    // Update tracking file
+                    updateTrackingFile(campaignId, phoneNumber, 'Failed', 'Number not registered on WhatsApp');
+                }
+                
+                io.emit('message_sent', { 
+                    number: phoneNumber, 
+                    status: 'not_registered', 
+                    progress: currentIndex + 1, 
+                    total: phoneNumbers.length + startIndex,
+                    campaignId: campaignId
+                });
+            }
+            
+            // Human behavior: Random delay between messages (1800-2400 seconds)
+            if (i < phoneNumbers.length - 1) { // Don't delay after the last message
+                const humanDelay = getRandomDelay(1800000, 2400000); // 1800-2400 seconds (30-40 minutes)
+                console.log(`Human-like delay: waiting ${humanDelay/1000}s before next message...`);
+                
+                io.emit('human_behavior', {
+                    number: phoneNumber,
+                    action: 'human_delay',
+                    duration: humanDelay,
+                    progress: currentIndex + 1,
+                    total: phoneNumbers.length + startIndex,
+                    nextNumber: phoneNumbers[i + 1],
+                    campaignId: campaignId
+                });
+                
+                // Show as away/inactive during long delay
+                try {
+                    await client.sendPresenceUnavailable();
+                } catch (err) {
+                    console.log('Could not set presence unavailable (non-critical):', err.message);
+                }
+                
+                await new Promise(resolve => setTimeout(resolve, humanDelay));
+            }
+            
+        } catch (error) {
+            console.error(`Error sending message to ${phoneNumber}:`, error);
+            results.push({ number: phoneNumber, status: 'failed', error: error.message });
+            failureCount++;
+            
+            // Update campaign state
+            if (campaignId) {
+                const campaignState = activeCampaigns.get(campaignId);
+                if (campaignState) {
+                    campaignState.failedCount++;
+                    campaignState.lastActivity = new Date();
+                }
+                // Update tracking file
+                updateTrackingFile(campaignId, phoneNumber, 'Failed', error.message);
+            }
+            
+            io.emit('message_sent', { 
+                number: phoneNumber, 
+                status: 'failed', 
+                error: error.message,
+                progress: currentIndex + 1, 
+                total: phoneNumbers.length + startIndex,
+                campaignId: campaignId
+            });
+        }
+    }
+    
+    // Campaign completed
+    if (campaignId) {
+        const campaignState = activeCampaigns.get(campaignId);
+        if (campaignState) {
+            // Remove from active campaigns
+            activeCampaigns.delete(campaignId);
+            
+            // Emit completion event
+            io.emit('bulk_send_complete', { 
+                total: campaignState.phoneNumbers.length, 
+                success: campaignState.sentCount, 
+                failed: campaignState.failedCount,
+                campaignId: campaignId
+            });
+            
+            // Clean up media file if it exists
+            if (campaignState.mediaFile && campaignState.mediaFile.path) {
+                try {
+                    fs.unlinkSync(campaignState.mediaFile.path);
+                    console.log('Media file cleaned up successfully');
+                } catch (cleanupError) {
+                    console.error('Error cleaning up media file:', cleanupError);
+                }
+            }
+            
+            // Clean up tracking file
+            const fileInfo = campaignFiles.get(campaignId);
+            if (fileInfo && fs.existsSync(fileInfo.trackingPath)) {
+                try {
+                    // Keep the tracking file for reference, but log its location
+                    console.log(`Campaign tracking file saved at: ${fileInfo.trackingPath}`);
+                } catch (cleanupError) {
+                    console.error('Error handling tracking file:', cleanupError);
+                }
+            }
+        }
+    }
+    
+    return { successCount, failureCount, results };
+}
+function addHumanVariation() {
+    // Occasionally add extra delays to simulate distractions
+    const shouldAddDistraction = Math.random() < 0.1; // 10% chance
+    if (shouldAddDistraction) {
+        return getRandomDelay(5000, 20000); // 5-20 second distraction
+    }
+    return 0;
+}
+
+// Helper function to validate and format phone numbers
+function validateAndFormatPhoneNumber(phoneNumber, rowIndex) {
+    // Skip if this looks like a header (contains letters and is not a valid phone number)
+    if (rowIndex === 0 && /[a-zA-Z]/.test(phoneNumber) && !/^\d+$/.test(phoneNumber.replace(/[+\-\s]/g, ''))) {
+        console.log('Skipping header row:', phoneNumber);
+        return null;
+    }
+    
+    // Validate that it's actually a phone number
+    const cleanNumber = phoneNumber.replace(/[+\-\s]/g, '');
+    if (!/^\d+$/.test(cleanNumber)) {
+        console.log('Skipping invalid phone number:', phoneNumber);
+        return null;
+    }
+    
+    // Additional validation: ensure minimum length
+    if (cleanNumber.length < 10) {
+        console.log('Skipping phone number too short:', phoneNumber);
+        return null;
+    }
+    
+    // Format phone number: ensure it starts with country code
+    if (phoneNumber.startsWith('91') && phoneNumber.length === 12) {
+        return phoneNumber + '@c.us';
+    } else if (phoneNumber.startsWith('+91')) {
+        return phoneNumber.substring(1) + '@c.us';
+    } else if (phoneNumber.length === 10) {
+        return '91' + phoneNumber + '@c.us';
+    } else {
+        return phoneNumber + '@c.us';
+    }
+}
+
+// Socket.IO connection handling
+io.on('connection', (socket) => {
+    console.log('Client connected:', socket.id);
+    
+    // Send current status to newly connected client
+    socket.emit('status', {
+        authenticated: isClientAuthenticated,
+        ready: isClientReady,
+        message: getStatusMessage()
+    });
+    
+    // Send QR code if available
+    if (qrCodeData) {
+        socket.emit('qr', qrCodeData);
+    }
+    
+    socket.on('disconnect', () => {
+        console.log('Client disconnected:', socket.id);
+    });
+});
+
+// Serve the main HTML page (redirects to login)
+app.get('/', (req, res) => {
+    res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
+// Serve the login page
+app.get('/login', (req, res) => {
+    res.sendFile(path.join(__dirname, 'public', 'login.html'));
+});
+
+// Serve the dashboard page
+app.get('/dashboard', (req, res) => {
+    res.sendFile(path.join(__dirname, 'public', 'dashboard.html'));
+});
+
+// Start server
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => {
+    console.log(`Server running on http://localhost:${PORT}`);
+    console.log('Initializing WhatsApp client...');
+    initializeWhatsAppClient();
+});
+
+// Graceful shutdown
+process.on('SIGINT', async () => {
+    console.log('Shutting down gracefully...');
+    if (client) {
+        await client.destroy();
+    }
+    process.exit(0);
+});
