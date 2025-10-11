@@ -14,6 +14,7 @@ const logoutBtn = document.getElementById('logoutBtn');
 const clearSessionBtn = document.getElementById('clearSessionBtn');
 const forceReadyBtn = document.getElementById('forceReadyBtn');
 const checkConnectionBtn = document.getElementById('checkConnectionBtn');
+const showControlBtn = document.getElementById('showControlBtn');
 const sendBtn = document.getElementById('sendBtn');
 const phoneNumbers = document.getElementById('phoneNumbers');
 const mediaFile = document.getElementById('mediaFile');
@@ -30,9 +31,7 @@ const activeCampaigns = document.getElementById('activeCampaigns');
 const pendingCampaigns = document.getElementById('pendingCampaigns');
 const completedCampaigns = document.getElementById('completedCampaigns');
 
-// Message type elements
-const textMessageRadio = document.getElementById('textMessage');
-const mediaMessageRadio = document.getElementById('mediaMessage');
+// Message type elements (text messages only)
 const excelUploadSection = document.getElementById('excelUploadSection');
 const mediaUploadSection = document.getElementById('mediaUploadSection');
 
@@ -234,17 +233,44 @@ function setupEventListeners() {
     clearSessionBtn.addEventListener('click', handleClearSession);
     forceReadyBtn.addEventListener('click', handleForceReady);
     checkConnectionBtn.addEventListener('click', handleCheckConnection);
+    showControlBtn.addEventListener('click', () => {
+        console.log('Debug: Manual show control panel');
+        showControlPanel();
+        showControlBtn.style.display = 'none';
+    });
     sendBtn.addEventListener('click', handleSendMessages);
     phoneNumbers.addEventListener('input', handlePhoneNumbersInput);
     mediaFile.addEventListener('change', handleFileSelect);
     messageDelay.addEventListener('change', handleDelayChange);
+    messageText.addEventListener('input', handleMessageInput);
     
-    // Message type change events
-    textMessageRadio.addEventListener('change', handleMessageTypeChange);
-    mediaMessageRadio.addEventListener('change', handleMessageTypeChange);
+    // Add delay preview update
+    messageDelay.addEventListener('change', updateDelayPreview);
+    
+    // Message type change events (removed - text messages only)
     
     // Initialize delay display
     updateDelayInfo();
+    
+    // Initialize delay preview
+    updateDelayPreview();
+    
+    // Initialize character count
+    handleMessageInput();
+    
+    // Debug: Force show control panel if WhatsApp is ready
+    setTimeout(() => {
+        console.log('Debug: Checking WhatsApp status...');
+        console.log('isReady:', isReady);
+        console.log('isAuthenticated:', isAuthenticated);
+        console.log('controlSection display:', controlSection.style.display);
+        
+        // Force show control panel if it should be visible
+        if (isReady || isAuthenticated) {
+            console.log('Debug: Force showing control panel');
+            showControlPanel();
+        }
+    }, 2000);
     
 
 }
@@ -352,6 +378,11 @@ function showControlPanel() {
     controlSection.style.display = 'block';
     controlSection.classList.add('fade-in');
     updateSendButton();
+    
+    // Hide the show control button
+    if (showControlBtn) {
+        showControlBtn.style.display = 'none';
+    }
     
     // Show campaign section if there are campaigns
     if (campaigns.length > 0) {
@@ -506,45 +537,8 @@ async function handleLogout() {
     }
 }
 
-// Handle message type change
-function handleMessageTypeChange() {
-    const isTextMessage = textMessageRadio.checked;
-    
-    if (isTextMessage) {
-        // Show only Excel upload for text messaging
-        mediaUploadSection.style.display = 'none';
-        excelUploadSection.style.display = 'block';
-        
-        // Clear media file
-        mediaFile.value = '';
-        
-        // Update file input labels
-        document.querySelectorAll('.file-input-text').forEach(label => {
-            if (label.closest('#excelUploadSection')) {
-                label.textContent = 'Choose Excel File';
-            }
-        });
-    } else {
-        // Show media upload and Excel upload for media messaging
-        mediaUploadSection.style.display = 'block';
-        excelUploadSection.style.display = 'block';
-        
-        // Clear Excel file
-        excelFile.value = '';
-        
-        // Update file input labels
-        document.querySelectorAll('.file-input-text').forEach(label => {
-            if (label.closest('#mediaUploadSection')) {
-                label.textContent = 'SELECT MEDIA';
-            }
-            if (label.closest('#excelUploadSection')) {
-                label.textContent = 'Choose Excel File';
-            }
-        });
-    }
-    
-    updateSendButton();
-}
+// Handle message type change (removed - text messages only)
+// Function kept for compatibility but not used
 
 // Handle file selection
 function handleFileSelect(event) {
@@ -624,9 +618,40 @@ function updateDelayInfo() {
     handlePhoneNumbersInput();
 }
 
+// Handle message input
+function handleMessageInput() {
+    const message = messageText.value;
+    const charCountElement = document.getElementById('charCount');
+    
+    if (charCountElement) {
+        charCountElement.textContent = message.length;
+    }
+    
+    // Update send button state
+    updateSendButton();
+}
+
+// Update delay preview
+function updateDelayPreview() {
+    const currentDelay = messageDelay.value;
+    const delayPreviewElement = document.getElementById('delayPreview');
+    
+    if (delayPreviewElement) {
+        const [minDelay, maxDelay] = parseDelayRange(currentDelay);
+        const minMinutes = Math.ceil(minDelay / 60);
+        const maxMinutes = Math.ceil(maxDelay / 60);
+        
+        if (minMinutes === maxMinutes) {
+            delayPreviewElement.textContent = `${minMinutes} minutes between messages`;
+        } else {
+            delayPreviewElement.textContent = `${minMinutes}-${maxMinutes} minutes between messages`;
+        }
+    }
+}
+
 // Update send button state
 function updateSendButton() {
-    const isTextMessage = textMessageRadio.checked;
+    // Text messages only (no media option)
     let hasFile = false;
     let hasRequiredData = false;
     let hasValidNumbers = false;
@@ -639,49 +664,117 @@ function updateSendButton() {
     const limit = numberLimits[currentDelay].limit;
     hasValidNumbers = count > 0 && count <= limit;
     
-    if (isTextMessage) {
-        // For text messages, need phone numbers and message
-        hasFile = hasValidNumbers;
-        hasRequiredData = messageText.value.trim().length > 0;
-    } else {
-        // For media messages, need media file, phone numbers, and optionally message
-        hasFile = mediaFile.files.length > 0 && hasValidNumbers;
-        hasRequiredData = true; // Media file and numbers are required
-    }
+    // For text messages, need phone numbers and message
+    hasFile = hasValidNumbers;
+    hasRequiredData = messageText.value.trim().length > 0;
+    
+    // Update recipient count and estimated time
+    updateRecipientStats(count, currentDelay);
     
     // Allow sending when authenticated (not just when ready)
     const canSend = (isReady || isAuthenticated) && hasFile && hasRequiredData && !isSending;
     sendBtn.disabled = !canSend;
     
     if (isSending) {
-        sendBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Sending...';
+        sendBtn.innerHTML = `
+            <div class="send-btn-content">
+                <div class="send-icon">
+                    <i class="fas fa-spinner fa-spin"></i>
+                </div>
+                <div class="send-text">
+                    <span class="send-label">Sending...</span>
+                    <span class="send-subtitle">Please wait</span>
+                </div>
+            </div>
+        `;
     } else if (!canSend) {
+        let errorText = '';
+        let errorSubtitle = '';
+        
         if (!isReady && !isAuthenticated) {
-            sendBtn.innerHTML = '<i class="fas fa-times-circle"></i> WhatsApp Not Connected';
+            errorText = 'WhatsApp Not Connected';
+            errorSubtitle = 'Connect WhatsApp first';
         } else if (!hasFile) {
-            const missingFile = isTextMessage ? 'Excel file' : 'Media and Excel files';
-            sendBtn.innerHTML = `<i class="fas fa-times-circle"></i> Upload ${missingFile}`;
+            errorText = 'Enter Phone Numbers';
+            errorSubtitle = 'Add recipients to continue';
         } else if (!hasRequiredData) {
-            sendBtn.innerHTML = '<i class="fas fa-times-circle"></i> Enter Message';
+            errorText = 'Enter Message';
+            errorSubtitle = 'Write your message';
         } else {
-            const buttonText = isTextMessage ? 'Send Messages' : 'Send Media Message';
-            sendBtn.innerHTML = `<i class="fas fa-paper-plane"></i> ${buttonText}`;
+            errorText = 'Send Messages';
+            errorSubtitle = 'Start bulk messaging campaign';
         }
+        
+        sendBtn.innerHTML = `
+            <div class="send-btn-content">
+                <div class="send-icon">
+                    <i class="fas fa-times-circle"></i>
+                </div>
+                <div class="send-text">
+                    <span class="send-label">${errorText}</span>
+                    <span class="send-subtitle">${errorSubtitle}</span>
+                </div>
+            </div>
+        `;
     } else {
-        const buttonText = isTextMessage ? 'Send Messages' : 'Send Media Message';
-        sendBtn.innerHTML = `<i class="fas fa-paper-plane"></i> ${buttonText}`;
+        sendBtn.innerHTML = `
+            <div class="send-btn-content">
+                <div class="send-icon">
+                    <i class="fas fa-paper-plane"></i>
+                </div>
+                <div class="send-text">
+                    <span class="send-label">Send Messages</span>
+                    <span class="send-subtitle">Start bulk messaging campaign</span>
+                </div>
+            </div>
+            <div class="send-arrow">
+                <i class="fas fa-arrow-right"></i>
+            </div>
+        `;
     }
+}
+
+// Update recipient statistics
+function updateRecipientStats(count, delayRange) {
+    const recipientCountElement = document.getElementById('recipientCount');
+    const estimatedTimeElement = document.getElementById('estimatedTime');
+    
+    if (recipientCountElement) {
+        recipientCountElement.textContent = count;
+    }
+    
+    if (estimatedTimeElement && count > 0) {
+        const [minDelay, maxDelay] = parseDelayRange(delayRange);
+        const avgDelay = (minDelay + maxDelay) / 2;
+        const totalSeconds = count * avgDelay;
+        const totalMinutes = Math.ceil(totalSeconds / 60);
+        
+        if (totalMinutes < 60) {
+            estimatedTimeElement.textContent = `${totalMinutes} min`;
+        } else {
+            const hours = Math.floor(totalMinutes / 60);
+            const minutes = totalMinutes % 60;
+            if (minutes === 0) {
+                estimatedTimeElement.textContent = `${hours}h`;
+            } else {
+                estimatedTimeElement.textContent = `${hours}h ${minutes}m`;
+            }
+        }
+    } else if (estimatedTimeElement) {
+        estimatedTimeElement.textContent = '0 min';
+    }
+}
+
+// Parse delay range string (e.g., "1800-3600" -> [1800, 3600])
+function parseDelayRange(delayRange) {
+    const [min, max] = delayRange.split('-').map(Number);
+    return [min, max];
 }
 
 // Handle send messages
 async function handleSendMessages() {
-    const isTextMessage = textMessageRadio.checked;
-    
-    if (isTextMessage) {
-        await handleTextMessage();
-    } else {
-        await handleMediaMessage();
-    }
+    // Text messages only (no media option)
+    await handleTextMessage();
 }
 
 // Handle text message sending

@@ -10,9 +10,31 @@
 <body>
     <div class="container">
         <header class="header">
+            <div class="header-background"></div>
             <div class="header-content">
-                <i class="fab fa-whatsapp"></i>
-                <h1>WhatsApp Bulk Message Sender</h1>
+                <div class="logo-section">
+                    <div class="logo-icon">
+                        <i class="fab fa-whatsapp"></i>
+                    </div>
+                    <div class="logo-text">
+                        <h1>WhatsApp Bulk Sender</h1>
+                        <p>Professional Message Broadcasting Platform</p>
+                    </div>
+                </div>
+                <div class="header-features">
+                    <div class="feature-badge">
+                        <i class="fas fa-shield-alt"></i>
+                        <span>Secure</span>
+                    </div>
+                    <div class="feature-badge">
+                        <i class="fas fa-rocket"></i>
+                        <span>Fast</span>
+                    </div>
+                    <div class="feature-badge">
+                        <i class="fas fa-users"></i>
+                        <span>Bulk</span>
+                    </div>
+                </div>
             </div>
         </header>
 
@@ -21,14 +43,25 @@
             <section class="status-section">
                 <div class="status-card">
                     <div class="status-header">
-                        <h2><i class="fas fa-info-circle"></i> Connection Status</h2>
+                        <div class="status-title">
+                            <div class="status-icon">
+                                <i class="fas fa-wifi"></i>
+                            </div>
+                            <h2>Connection Status</h2>
+                        </div>
                         <div class="status-indicator" id="statusIndicator">
-                            <span class="status-dot"></span>
+                            <div class="status-dot-container">
+                                <span class="status-dot"></span>
+                                <div class="status-pulse"></div>
+                            </div>
                             <span class="status-text" id="statusText">Initializing...</span>
                         </div>
                     </div>
                     <div class="status-message" id="statusMessage">
-                        Initializing WhatsApp client...
+                        <div class="status-loading">
+                            <div class="loading-spinner"></div>
+                            <span>Initializing WhatsApp client...</span>
+                        </div>
                     </div>
                 </div>
             </section>
@@ -37,25 +70,61 @@
             <section class="qr-section" id="qrSection" style="display: none;">
                 <div class="qr-card">
                     <div class="qr-header">
-                        <h2><i class="fas fa-qrcode"></i> Scan QR Code</h2>
-                        <p>Open WhatsApp on your phone and scan this QR code</p>
+                        <div class="qr-title">
+                            <div class="qr-icon">
+                                <i class="fas fa-qrcode"></i>
+                            </div>
+                            <div class="qr-text">
+                                <h2>Scan QR Code</h2>
+                                <p>Connect your WhatsApp account to start sending messages</p>
+                            </div>
+                        </div>
                     </div>
                     <div class="qr-container">
-                        <div class="qr-code" id="qrCode">
-                            <div class="qr-loading">
-                                <i class="fas fa-spinner fa-spin"></i>
-                                <p>Generating QR Code...</p>
+                        <div class="qr-code-wrapper">
+                            <div class="qr-code" id="qrCode">
+                                <div class="qr-loading">
+                                    <div class="qr-spinner">
+                                        <div class="spinner-ring"></div>
+                                        <div class="spinner-ring"></div>
+                                        <div class="spinner-ring"></div>
+                                    </div>
+                                    <p>Generating QR Code...</p>
+                                </div>
+                            </div>
+                            <div class="qr-decoration">
+                                <div class="qr-corner top-left"></div>
+                                <div class="qr-corner top-right"></div>
+                                <div class="qr-corner bottom-left"></div>
+                                <div class="qr-corner bottom-right"></div>
                             </div>
                         </div>
                     </div>
                     <div class="qr-instructions">
-                        <ol>
-                            <li>Open WhatsApp on your phone</li>
-                            <li>Tap <strong>Menu</strong> or <strong>Settings</strong></li>
-                            <li>Tap <strong>Linked Devices</strong></li>
-                            <li>Tap <strong>Link a Device</strong></li>
-                            <li>Point your phone at this screen to capture the code</li>
-                        </ol>
+                        <h3><i class="fas fa-mobile-alt"></i> How to Connect</h3>
+                        <div class="instruction-steps">
+                            <div class="step">
+                                <div class="step-number">1</div>
+                                <div class="step-content">
+                                    <h4>Open WhatsApp</h4>
+                                    <p>Launch WhatsApp on your phone</p>
+                                </div>
+                            </div>
+                            <div class="step">
+                                <div class="step-number">2</div>
+                                <div class="step-content">
+                                    <h4>Go to Settings</h4>
+                                    <p>Tap Menu → Settings → Linked Devices</p>
+                                </div>
+                            </div>
+                            <div class="step">
+                                <div class="step-number">3</div>
+                                <div class="step-content">
+                                    <h4>Link Device</h4>
+                                    <p>Tap "Link a Device" and scan the QR code</p>
+                                </div>
+                            </div>
+                        </div>
                     </div>
                 </div>
             </section>
@@ -64,19 +133,35 @@
             <section class="control-section" id="controlSection" style="display: none;">
                 <div class="control-card">
                     <div class="control-header">
-                        <h2><i class="fas fa-cogs"></i> Control Panel</h2>
+                        <div class="control-title">
+                            <div class="control-icon">
+                                <i class="fas fa-sliders-h"></i>
+                            </div>
+                            <div class="control-text">
+                                <h2>Message Composer</h2>
+                                <p>Create and send bulk messages with advanced settings</p>
+                            </div>
+                        </div>
                         <div class="control-actions">
                             <button class="check-connection-btn" id="checkConnectionBtn" title="Check WhatsApp connection health">
-                                <i class="fas fa-heartbeat"></i> Check Connection
+                                <i class="fas fa-heartbeat"></i> 
+                                <span>Check Connection</span>
                             </button>
                             <button class="force-ready-btn" id="forceReadyBtn" title="Force ready state if stuck at authenticated" style="display: none;">
-                                <i class="fas fa-play"></i> Force Ready
+                                <i class="fas fa-play"></i> 
+                                <span>Force Ready</span>
                             </button>
                             <button class="clear-session-btn" id="clearSessionBtn" title="Clear session data if stuck">
-                                <i class="fas fa-broom"></i> Clear Session
+                                <i class="fas fa-broom"></i> 
+                                <span>Clear Session</span>
                             </button>
                             <button class="logout-btn" id="logoutBtn">
-                                <i class="fas fa-sign-out-alt"></i> Logout
+                                <i class="fas fa-sign-out-alt"></i> 
+                                <span>Logout</span>
+                            </button>
+                            <button class="force-ready-btn" id="showControlBtn" style="display: inline-flex;">
+                                <i class="fas fa-eye"></i> 
+                                <span>Show Controls</span>
                             </button>
                         </div>
                     </div>
@@ -84,43 +169,73 @@
                     <!-- Human Behavior Settings -->
                     <div class="human-behavior-section">
                         <div class="section-header">
-                            <h3><i class="fas fa-user-friends"></i> Human Behavior Simulation</h3>
+                            <div class="section-title">
+                                <div class="section-icon">
+                                    <i class="fas fa-user-friends"></i>
+                                </div>
+                                <h3>Smart Timing</h3>
+                            </div>
                             <div class="behavior-indicator">
-                                <span class="behavior-dot active"></span>
-                                <span class="behavior-text">Enabled</span>
+                                <div class="behavior-toggle">
+                                    <span class="behavior-dot active"></span>
+                                    <span class="behavior-text">Enabled</span>
+                                </div>
                             </div>
                         </div>
                         
                         <!-- Message Delay Selection -->
                         <div class="delay-selection">
-                            <label for="messageDelay">
-                                <i class="fas fa-clock"></i> Message Delay Between Recipients
-                            </label>
-                            <select id="messageDelay" class="delay-select">
-                                <option value="30-60">30-60 seconds (Fast)</option>
-                                <option value="60-120">60 seconds - 2 minutes (Normal)</option>
-                                <option value="300-600">5-10 minutes (Slow)</option>
-                                <option value="600-1200">10-20 minutes (Very Slow)</option>
-                                <option value="1800-3600" selected>30-60 minutes (Ultra Slow)</option>
-                            </select>
-                            <div class="delay-info">
-                                <p><i class="fas fa-info-circle"></i> Choose the delay range between sending messages to different recipients</p>
+                            <div class="delay-label">
+                                <div class="delay-icon">
+                                    <i class="fas fa-clock"></i>
+                                </div>
+                                <div class="delay-text">
+                                    <label for="messageDelay">Message Delay Between Recipients</label>
+                                    <p>Choose timing to avoid detection and ensure delivery</p>
+                                </div>
+                            </div>
+                            <div class="delay-selector">
+                                <select id="messageDelay" class="delay-select">
+                                    <option value="30-60">⚡ 30-60 seconds (Fast)</option>
+                                    <option value="60-120">🚀 60 seconds - 2 minutes (Normal)</option>
+                                    <option value="300-600">🐌 5-10 minutes (Slow)</option>
+                                    <option value="600-1200">🦥 10-20 minutes (Very Slow)</option>
+                                    <option value="1800-3600" selected>🐢 30-60 minutes (Ultra Slow)</option>
+                                </select>
+                                <div class="delay-preview">
+                                    <span class="delay-preview-text" id="delayPreview">30-60 minutes between messages</span>
+                                </div>
                             </div>
                         </div>
                         
                         <div class="behavior-info">
                             <div class="behavior-features">
-                                <div class="feature">
-                                    <i class="fas fa-keyboard"></i>
-                                    <span>Typing indicators with realistic timing</span>
+                                <div class="feature-item">
+                                    <div class="feature-icon">
+                                        <i class="fas fa-keyboard"></i>
+                                    </div>
+                                    <div class="feature-content">
+                                        <h4>Smart Timing</h4>
+                                        <p>Realistic delays between messages</p>
+                                    </div>
                                 </div>
-                                <div class="feature">
-                                    <i class="fas fa-eye"></i>
-                                    <span>Online/offline presence simulation</span>
+                                <div class="feature-item">
+                                    <div class="feature-icon">
+                                        <i class="fas fa-shield-alt"></i>
+                                    </div>
+                                    <div class="feature-content">
+                                        <h4>Anti-Detection</h4>
+                                        <p>Human-like behavior patterns</p>
+                                    </div>
                                 </div>
-                                <div class="feature">
-                                    <i class="fas fa-brain"></i>
-                                    <span>Thinking pauses and natural variations</span>
+                                <div class="feature-item">
+                                    <div class="feature-icon">
+                                        <i class="fas fa-chart-line"></i>
+                                    </div>
+                                    <div class="feature-content">
+                                        <h4>High Delivery</h4>
+                                        <p>Optimized for message delivery</p>
+                                    </div>
                                 </div>
                             </div>
                         </div>
@@ -129,16 +244,44 @@
                     <!-- Message Type Selection -->
              
                    
-                    <!-- Message Composer (Caption) -->
+                    <!-- Message Composer -->
                     <div class="message-composer">
-                        <label for="messageText">
-                            <i class="fas fa-message"></i> Caption
-                        </label>
-                        <textarea 
-                            id="messageText" 
-                            placeholder="Write a caption..."
-                            rows="4"
-                        >Hello! This is a message from WhatsApp Bulk Sender.</textarea>
+                        <div class="composer-header">
+                            <div class="composer-title">
+                                <div class="composer-icon">
+                                    <i class="fas fa-edit"></i>
+                                </div>
+                                <div class="composer-text">
+                                    <h3>Message Content</h3>
+                                    <p>Write your message that will be sent to all recipients</p>
+                                </div>
+                            </div>
+                            <div class="message-counter">
+                                <span class="char-count" id="charCount">0</span>
+                                <span class="char-limit">/ 4096</span>
+                            </div>
+                        </div>
+                        <div class="message-input-container">
+                            <textarea 
+                                id="messageText" 
+                                placeholder="Type your message here...&#10;&#10;Example:&#10;Hello! This is a promotional message from our company.&#10;Visit our website for more information."
+                                rows="6"
+                                maxlength="4096"
+                            >Hello! This is a message from WhatsApp Bulk Sender.</textarea>
+                            <div class="message-tools">
+                                <div class="tool-group">
+                                    <button type="button" class="tool-btn" title="Insert current date">
+                                        <i class="fas fa-calendar"></i>
+                                    </button>
+                                    <button type="button" class="tool-btn" title="Insert current time">
+                                        <i class="fas fa-clock"></i>
+                                    </button>
+                                    <button type="button" class="tool-btn" title="Clear message">
+                                        <i class="fas fa-trash"></i>
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
                     </div>
 
                     <!-- Media File Upload -->
@@ -166,32 +309,94 @@
 
                     <!-- Phone Numbers Input -->
                     <div class="phone-numbers-section" id="phoneNumbersSection">
-                        <label for="phoneNumbers">
-                            <i class="fas fa-phone"></i> Phone Numbers
-                        </label>
-                        <textarea 
-                            id="phoneNumbers" 
-                            placeholder="Enter phone numbers (one per line)&#10;Example:&#10;919835126411&#10;919876543210&#10;919123456789"
-                            rows="8"
-                            class="phone-numbers-input"
-                        ></textarea>
-                        <div class="phone-numbers-info">
-                            <div class="number-count">
-                                <span class="count-label">Numbers entered:</span>
-                                <span class="count-value" id="numberCount">0</span>
-                                <span class="count-limit" id="numberLimit">/ 30</span>
+                        <div class="numbers-header">
+                            <div class="numbers-title">
+                                <div class="numbers-icon">
+                                    <i class="fas fa-users"></i>
+                                </div>
+                                <div class="numbers-text">
+                                    <h3>Recipients</h3>
+                                    <p>Add phone numbers of people who will receive your message</p>
+                                </div>
                             </div>
-                            <p><i class="fas fa-info-circle"></i> Enter phone numbers with country code (one per line)</p>
-                            <p><strong>Format:</strong> 919835126411 (with country code)</p>
-                            <p><strong>Limit:</strong> <span id="limitInfo">30 numbers for 30-60 seconds delay</span></p>
+                            <div class="numbers-counter">
+                                <div class="counter-display">
+                                    <span class="count-value" id="numberCount">0</span>
+                                    <span class="count-separator">/</span>
+                                    <span class="count-limit" id="numberLimit">30</span>
+                                </div>
+                                <div class="counter-label">recipients</div>
+                            </div>
+                        </div>
+                        <div class="numbers-input-container">
+                            <textarea 
+                                id="phoneNumbers" 
+                                placeholder="Enter phone numbers (one per line)&#10;&#10;Example:&#10;919835126411&#10;919876543210&#10;919123456789&#10;&#10;💡 Tip: Include country code for international numbers"
+                                rows="8"
+                                class="phone-numbers-input"
+                            ></textarea>
+                            <div class="numbers-tools">
+                                <div class="tool-group">
+                                    <button type="button" class="tool-btn" title="Validate numbers">
+                                        <i class="fas fa-check-circle"></i>
+                                    </button>
+                                    <button type="button" class="tool-btn" title="Clear all numbers">
+                                        <i class="fas fa-trash"></i>
+                                    </button>
+                                    <button type="button" class="tool-btn" title="Import from file">
+                                        <i class="fas fa-file-import"></i>
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="numbers-info">
+                            <div class="info-grid">
+                                <div class="info-item">
+                                    <i class="fas fa-info-circle"></i>
+                                    <span>Include country code (e.g., 91 for India)</span>
+                                </div>
+                                <div class="info-item">
+                                    <i class="fas fa-format-list-numbered"></i>
+                                    <span>One number per line</span>
+                                </div>
+                                <div class="info-item">
+                                    <i class="fas fa-chart-bar"></i>
+                                    <span>Limit: <span id="limitInfo">30 numbers for 30-60 seconds delay</span></span>
+                                </div>
+                            </div>
                         </div>
                     </div>
 
                     <!-- Send Button -->
                     <div class="send-section">
-                        <button class="send-btn" id="sendBtn" disabled>
-                            <i class="fas fa-paper-plane"></i> Send Messages
-                        </button>
+                        <div class="send-container">
+                            <button class="send-btn" id="sendBtn" disabled>
+                                <div class="send-btn-content">
+                                    <div class="send-icon">
+                                        <i class="fas fa-paper-plane"></i>
+                                    </div>
+                                    <div class="send-text">
+                                        <span class="send-label">Send Messages</span>
+                                        <span class="send-subtitle">Start bulk messaging campaign</span>
+                                    </div>
+                                </div>
+                                <div class="send-arrow">
+                                    <i class="fas fa-arrow-right"></i>
+                                </div>
+                            </button>
+                            <div class="send-info">
+                                <div class="send-stats">
+                                    <div class="stat-item">
+                                        <i class="fas fa-clock"></i>
+                                        <span>Estimated time: <span id="estimatedTime">0 min</span></span>
+                                    </div>
+                                    <div class="stat-item">
+                                        <i class="fas fa-users"></i>
+                                        <span>Recipients: <span id="recipientCount">0</span></span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
                     </div>
                 </div>
             </section>
