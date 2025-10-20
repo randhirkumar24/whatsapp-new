@@ -1307,6 +1307,10 @@ app.post('/api/upload-and-send', upload.fields([
                 failed: failureCount,
                 campaignId: campaignId
             });
+            
+            // Close Chrome browser to save costs after non-campaign messages are sent
+            console.log('💰 Non-campaign messages completed - closing Chrome browser to save costs...');
+            await closeChromeBrowser();
         }
 
         // Clean up media file after all messages are sent
@@ -1352,6 +1356,8 @@ function getStatusMessage() {
         return 'WhatsApp authenticated, initializing...';
     } else if (qrCodeData) {
         return 'Scan QR code with your WhatsApp mobile app';
+    } else if (!client || !client.pupBrowser) {
+        return 'Chrome browser is closed to save costs - will reopen automatically when sending messages';
     } else {
         return 'Initializing WhatsApp client...';
     }
@@ -1428,11 +1434,78 @@ function isNumberUnavailableError(error) {
     return unavailablePatterns.some(pattern => errorMessage.includes(pattern)) || isTimeoutError;
 }
 
+// Function to close Chrome browser and save costs
+async function closeChromeBrowser() {
+    try {
+        if (client && client.pupBrowser) {
+            console.log('🔒 Closing Chrome browser to save resources...');
+            await client.pupBrowser.close();
+            client.pupBrowser = null;
+            client.pupPage = null;
+            isClientReady = false;
+            isClientAuthenticated = false;
+            console.log('✅ Chrome browser closed successfully');
+        }
+    } catch (error) {
+        console.error('❌ Error closing Chrome browser:', error.message);
+    }
+}
+
+// Function to ensure Chrome browser is available for sending messages
+async function ensureChromeBrowserAvailable() {
+    try {
+        // Check if browser is available and not closed
+        if (!client || !client.pupBrowser || !client.pupPage || client.pupPage.isClosed()) {
+            console.log('🔄 Chrome browser not available - reopening with saved session...');
+            
+            // Clean up any existing client state
+            if (client) {
+                try {
+                    await client.destroy();
+                } catch (destroyError) {
+                    console.log('Note: Error destroying existing client (expected if already closed):', destroyError.message);
+                }
+                client = null;
+            }
+            
+            // Reset states
+            isClientReady = false;
+            isClientAuthenticated = false;
+            qrCodeData = null;
+            
+            // Initialize new client
+            await initializeWhatsAppClient();
+            
+            // Wait for client to be ready
+            let attempts = 0;
+            const maxAttempts = 30; // 30 seconds timeout
+            
+            while (!isClientReady && attempts < maxAttempts) {
+                await new Promise(resolve => setTimeout(resolve, 1000));
+                attempts++;
+                console.log(`⏳ Waiting for WhatsApp client to be ready... (${attempts}/${maxAttempts})`);
+            }
+            
+            if (!isClientReady) {
+                throw new Error('Failed to initialize WhatsApp client after reopening Chrome - session may need re-authentication');
+            }
+            
+            console.log('✅ Chrome browser reopened successfully with restored session');
+        }
+    } catch (error) {
+        console.error('❌ Error ensuring Chrome browser availability:', error.message);
+        throw error;
+    }
+}
+
 // Puppeteer-based message sending strategy using URL method (text messages only)
 // This implements the WhatsApp URL method exactly as in the working test code
 async function sendMessageWithPuppeteer(phoneNumber, message, mediaFile = null) {
     try {
         console.log(`Using Puppeteer URL method to send message to ${phoneNumber}`);
+        
+        // Ensure Chrome browser is available (will reopen if needed)
+        await ensureChromeBrowserAvailable();
         
         // Validate client and page
         if (!client || !client.pupPage || client.pupPage.isClosed()) {
@@ -1805,6 +1878,10 @@ async function sendMessagesSequentially(phoneNumbers, message, campaignId = null
             }
             
             // Campaign completed - no tracking file needed
+            
+            // Close Chrome browser to save costs after campaign completion
+            console.log('💰 Campaign completed - closing Chrome browser to save costs...');
+            await closeChromeBrowser();
         }
     }
     
