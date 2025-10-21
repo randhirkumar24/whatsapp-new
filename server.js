@@ -70,6 +70,12 @@ function startKeepAlive() {
         clearInterval(keepAliveInterval);
     }
     
+    // Only start keep-alive if Chrome is actually running
+    if (!client || !client.pupBrowser) {
+        console.log('Keep-alive not started - Chrome browser not running');
+        return;
+    }
+    
     // Enhanced keep-alive every 2 minutes with connection validation
     keepAliveInterval = setInterval(async () => {
         if (client && isClientReady && isClientAuthenticated) {
@@ -103,6 +109,12 @@ function startConnectionHealthCheck() {
         clearInterval(connectionHealthCheckInterval);
     }
     
+    // Only start health check if Chrome is actually running
+    if (!client || !client.pupBrowser) {
+        console.log('Connection health check not started - Chrome browser not running');
+        return;
+    }
+    
     // Check connection health every 30 seconds
     connectionHealthCheckInterval = setInterval(async () => {
         if (client && isClientReady && isClientAuthenticated) {
@@ -130,6 +142,12 @@ function startCampaignHealthMonitoring() {
     // Clear any existing health monitoring
     if (campaignHealthInterval) {
         clearInterval(campaignHealthInterval);
+    }
+    
+    // Only start campaign monitoring if there are active campaigns
+    if (activeCampaigns.size === 0) {
+        console.log('Campaign health monitoring not started - no active campaigns');
+        return;
     }
     
     // Monitor campaign health every 5 minutes
@@ -625,6 +643,7 @@ app.get('/api/status', (req, res) => {
         authenticated: isClientAuthenticated,
         ready: isClientReady,
         hasQR: qrCodeData !== null,
+        chromeInitialized: client !== null,
         message: getStatusMessage()
     });
 });
@@ -1044,6 +1063,10 @@ app.post('/api/upload-and-send', upload.fields([
     { name: 'excelFile', maxCount: 1 }
 ]), async (req, res) => {
     try {
+        // Ensure client is ready (lazy initialization)
+        console.log('📨 Message send request received - ensuring Chrome is ready...');
+        await ensureClientReady();
+        
         if (!isClientReady && !isClientAuthenticated) {
             return res.status(400).json({ error: 'WhatsApp client is not ready. Please authenticate first.' });
         }
@@ -1356,7 +1379,9 @@ function getStatusMessage() {
         return 'WhatsApp authenticated, initializing...';
     } else if (qrCodeData) {
         return 'Scan QR code with your WhatsApp mobile app';
-    } else if (!client || !client.pupBrowser) {
+    } else if (!client) {
+        return 'Chrome browser is closed to save RAM (700MB+ savings) - will open automatically when you send messages';
+    } else if (!client.pupBrowser) {
         return 'Chrome browser is closed to save costs - will reopen automatically when sending messages';
     } else {
         return 'Initializing WhatsApp client...';
@@ -1434,39 +1459,41 @@ function isNumberUnavailableError(error) {
     return unavailablePatterns.some(pattern => errorMessage.includes(pattern)) || isTimeoutError;
 }
 
-// Function to close Chrome browser and save costs
-async function closeChromeBrowser() {
+// Function to ensure client is ready (lazy initialization)
+async function ensureClientReady() {
     try {
-        if (client && client.pupBrowser) {
-            console.log('🔒 Closing Chrome browser to save resources...');
-            await client.pupBrowser.close();
-            client.pupBrowser = null;
-            client.pupPage = null;
-            isClientReady = false;
-            isClientAuthenticated = false;
-            console.log('✅ Chrome browser closed successfully');
+        // If client is not initialized at all, initialize it
+        if (!client) {
+            console.log('🚀 Chrome browser not initialized - starting for the first time...');
+            await initializeWhatsAppClient();
+            
+            // Wait for client to be ready
+            let attempts = 0;
+            const maxAttempts = 60; // 60 seconds timeout
+            
+            while (!isClientReady && attempts < maxAttempts) {
+                await new Promise(resolve => setTimeout(resolve, 1000));
+                attempts++;
+                console.log(`⏳ Waiting for WhatsApp client to be ready... (${attempts}/${maxAttempts})`);
+            }
+            
+            if (!isClientReady) {
+                throw new Error('Failed to initialize WhatsApp client - session may need re-authentication');
+            }
+            
+            console.log('✅ Chrome browser initialized successfully with restored session');
         }
-    } catch (error) {
-        console.error('❌ Error closing Chrome browser:', error.message);
-    }
-}
-
-// Function to ensure Chrome browser is available for sending messages
-async function ensureChromeBrowserAvailable() {
-    try {
-        // Check if browser is available and not closed
-        if (!client || !client.pupBrowser || !client.pupPage || client.pupPage.isClosed()) {
+        // If client exists but browser is closed, reopen it
+        else if (!client.pupBrowser || !client.pupPage || client.pupPage.isClosed()) {
             console.log('🔄 Chrome browser not available - reopening with saved session...');
             
             // Clean up any existing client state
-            if (client) {
-                try {
-                    await client.destroy();
-                } catch (destroyError) {
-                    console.log('Note: Error destroying existing client (expected if already closed):', destroyError.message);
-                }
-                client = null;
+            try {
+                await client.destroy();
+            } catch (destroyError) {
+                console.log('Note: Error destroying existing client (expected if already closed):', destroyError.message);
             }
+            client = null;
             
             // Reset states
             isClientReady = false;
@@ -1478,7 +1505,7 @@ async function ensureChromeBrowserAvailable() {
             
             // Wait for client to be ready
             let attempts = 0;
-            const maxAttempts = 30; // 30 seconds timeout
+            const maxAttempts = 60; // 60 seconds timeout
             
             while (!isClientReady && attempts < maxAttempts) {
                 await new Promise(resolve => setTimeout(resolve, 1000));
@@ -1492,11 +1519,47 @@ async function ensureChromeBrowserAvailable() {
             
             console.log('✅ Chrome browser reopened successfully with restored session');
         }
+        
+        return true;
     } catch (error) {
         console.error('❌ Error ensuring Chrome browser availability:', error.message);
         throw error;
     }
 }
+
+// Function to close Chrome browser and save costs
+async function closeChromeBrowser() {
+    try {
+        if (client && client.pupBrowser) {
+            console.log('🔒 Closing Chrome browser to save resources...');
+            
+            // Stop all intervals before closing Chrome
+            if (keepAliveInterval) {
+                clearInterval(keepAliveInterval);
+                keepAliveInterval = null;
+            }
+            if (connectionHealthCheckInterval) {
+                clearInterval(connectionHealthCheckInterval);
+                connectionHealthCheckInterval = null;
+            }
+            if (campaignHealthInterval) {
+                clearInterval(campaignHealthInterval);
+                campaignHealthInterval = null;
+            }
+            
+            await client.pupBrowser.close();
+            client.pupBrowser = null;
+            client.pupPage = null;
+            isClientReady = false;
+            isClientAuthenticated = false;
+            console.log('✅ Chrome browser closed successfully');
+        }
+    } catch (error) {
+        console.error('❌ Error closing Chrome browser:', error.message);
+        // Don't throw error to prevent server crash
+    }
+}
+
 
 // Puppeteer-based message sending strategy using URL method (text messages only)
 // This implements the WhatsApp URL method exactly as in the working test code
@@ -1505,7 +1568,7 @@ async function sendMessageWithPuppeteer(phoneNumber, message, mediaFile = null) 
         console.log(`Using Puppeteer URL method to send message to ${phoneNumber}`);
         
         // Ensure Chrome browser is available (will reopen if needed)
-        await ensureChromeBrowserAvailable();
+        await ensureClientReady();
         
         // Validate client and page
         if (!client || !client.pupPage || client.pupPage.isClosed()) {
@@ -1881,7 +1944,12 @@ async function sendMessagesSequentially(phoneNumbers, message, campaignId = null
             
             // Close Chrome browser to save costs after campaign completion
             console.log('💰 Campaign completed - closing Chrome browser to save costs...');
-            await closeChromeBrowser();
+            try {
+                await closeChromeBrowser();
+            } catch (error) {
+                console.error('❌ Error closing Chrome after campaign completion:', error.message);
+                // Don't throw error to prevent server crash
+            }
         }
     }
     
@@ -1969,15 +2037,32 @@ app.get('/dashboard', (req, res) => {
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
     console.log(`Server running on http://localhost:${PORT}`);
-    console.log('Initializing WhatsApp client...');
-    initializeWhatsAppClient();
+    console.log('🚀 Server started - Chrome will initialize automatically when you send your first message');
+    console.log('💰 Chrome browser is currently closed to save RAM (saves ~700MB when idle)');
+    console.log('📊 Current RAM usage: ~50MB (Node.js only)');
+    // Chrome will be initialized lazily when first message is sent
+});
+
+// Global error handlers to prevent server crashes
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+    // Don't exit the process, just log the error
+});
+
+process.on('uncaughtException', (error) => {
+    console.error('Uncaught Exception:', error);
+    // Don't exit the process, just log the error
 });
 
 // Graceful shutdown
 process.on('SIGINT', async () => {
     console.log('Shutting down gracefully...');
     if (client) {
-        await client.destroy();
+        try {
+            await client.destroy();
+        } catch (error) {
+            console.error('Error destroying client:', error);
+        }
     }
     process.exit(0);
 });

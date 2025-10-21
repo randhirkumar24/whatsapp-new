@@ -80,6 +80,12 @@ document.addEventListener('DOMContentLoaded', function() {
     // Request initial status
     requestStatus();
     
+    // Ensure control panel is visible by default
+    setTimeout(() => {
+        console.log('🔧 Ensuring control panel is visible on startup');
+        showControlPanel();
+    }, 1000);
+    
     // Set up console log monitoring for campaign progress
     setupConsoleLogMonitoring();
     
@@ -211,13 +217,29 @@ function setupEventListeners() {
         console.log('Bulk send completed:', data);
         showToast(`Bulk send completed! ${data.success} sent, ${data.failed} failed`, 'success');
         isSending = false;
-        updateSendButton();
         
         // Complete current campaign and start next one
         if (activeCampaign && data.campaignId === activeCampaign.id) {
             completeCampaign(activeCampaign.id, data);
             startNextCampaign();
         }
+        
+        // Force show control panel immediately after campaign completion
+        console.log('🚀 Force showing control panel after campaign completion');
+        showControlPanel();
+        updateSendButton();
+        
+        // Request fresh status update to reflect Chrome closure
+        setTimeout(() => {
+            console.log('🔄 Fetching fresh status after campaign completion...');
+            fetch('/api/status')
+                .then(response => response.json())
+                .then(data => {
+                    console.log('📊 Fresh status received:', data);
+                    updateStatus(data);
+                })
+                .catch(error => console.error('Error fetching status after completion:', error));
+        }, 2000); // Increased timeout to ensure Chrome has time to close
     });
 
     // Human behavior events
@@ -309,13 +331,30 @@ async function requestQRCode() {
 
 // Update status display
 function updateStatus(data) {
+    console.log('🔄 Updating status:', data);
     isAuthenticated = data.authenticated;
     isReady = data.ready;
     
     // Update status indicator
     const statusDot = statusIndicator.querySelector('.status-dot');
     statusText.textContent = getStatusText(data);
-    statusMessage.textContent = data.message;
+    
+    // Show helpful message when Chrome is closed to save RAM
+    if (!data.chromeInitialized && !data.ready && !data.authenticated) {
+        statusMessage.innerHTML = `
+            <div class="status-message-content">
+                <div class="status-icon">
+                    <i class="fas fa-memory"></i>
+                </div>
+                <div class="status-text-content">
+                    <strong>Chrome browser is closed to save RAM (700MB+ savings)</strong>
+                    <p>Chrome will open automatically when you start sending messages. Your WhatsApp session is saved and will be restored instantly.</p>
+                </div>
+            </div>
+        `;
+    } else {
+        statusMessage.textContent = data.message;
+    }
     
     // Update status dot color
     statusDot.className = 'status-dot';
@@ -342,8 +381,10 @@ function updateStatus(data) {
         hideControlPanel();
         forceReadyBtn.style.display = 'none';
     } else {
+        // Default case: Show control panel for all other states (including Chrome not initialized)
+        // This ensures users can always send messages - Chrome will initialize automatically
         hideQRSection();
-        hideControlPanel();
+        showControlPanel();
         forceReadyBtn.style.display = 'none';
     }
     
@@ -356,6 +397,8 @@ function getStatusText(data) {
         return 'Ready';
     } else if (data.authenticated) {
         return 'Authenticated';
+    } else if (!data.chromeInitialized) {
+        return 'Chrome Closed (Saving RAM)';
     } else {
         return 'Not Connected';
     }
@@ -378,6 +421,7 @@ function hideQRSection() {
 }
 
 function showControlPanel() {
+    console.log('📱 Showing control panel');
     controlSection.style.display = 'block';
     controlSection.classList.add('fade-in');
     updateSendButton();
@@ -674,8 +718,9 @@ function updateSendButton() {
     // Update recipient count and estimated time
     updateRecipientStats(count, currentDelay);
     
-    // Allow sending when authenticated (not just when ready)
-    const canSend = (isReady || isAuthenticated) && hasFile && hasRequiredData && !isSending;
+    // Allow sending when we have required data - Chrome will initialize automatically if needed
+    // After campaign completion, Chrome is closed but we should still allow sending
+    const canSend = hasFile && hasRequiredData && !isSending;
     sendBtn.disabled = !canSend;
     
     if (isSending) {
@@ -694,10 +739,7 @@ function updateSendButton() {
         let errorText = '';
         let errorSubtitle = '';
         
-        if (!isReady && !isAuthenticated) {
-            errorText = 'WhatsApp Not Connected';
-            errorSubtitle = 'Connect WhatsApp first';
-        } else if (!hasFile) {
+        if (!hasFile) {
             errorText = 'Enter Phone Numbers';
             errorSubtitle = 'Add recipients to continue';
         } else if (!hasRequiredData) {
